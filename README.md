@@ -26,6 +26,10 @@ Repository for **Darwin Gödel Machine (DGM)**, a novel self-improving system th
 # API keys, add to ~/.bashrc
 export OPENAI_API_KEY='...'
 export ANTHROPIC_API_KEY='...'
+
+# DGM_CLAUDE_MODEL defaults to an Anthropic Bedrock route, which requires AWS
+# credentials. For direct Anthropic API runs, choose the coding model explicitly.
+export DGM_CODE_MODEL='claude-haiku-4-5-20251001'
 ```
 
 ```bash
@@ -67,6 +71,24 @@ python -m polyglot.prepare_polyglot_dataset
 python DGM_outer.py
 ```
 By default, outputs will be saved in the `output_dgm/` directory.
+
+For SWE-bench Pro runs, prepare the benchmark assets in the enclosing swarms
+repository, then seed DGM with an initial Pro report:
+
+```bash
+python swe_bench/pro_harness.py \
+  --dataset-path ../../benchmarks/swebench_pro/dataset/test.jsonl \
+  --task-map ../../benchmarks/swebench_pro/task_maps/swebench_pro_test_50_seed0_v1.json \
+  --eval-source ../../third_party/SWE-bench_Pro-os \
+  --model-name initial_swebench_pro
+
+python swe_bench/make_pro_initial_metadata.py \
+  --report swe_bench_pro/reports/initial_swebench_pro_0.000.json \
+  --predictions-dir swe_bench_pro/predictions \
+  --output-dir initial_swebench_pro
+
+python DGM_outer.py --swebench_pro
+```
 
 ## File Structure
 - `analysis/` scripts used for plotting and analysis

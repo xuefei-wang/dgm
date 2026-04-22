@@ -4,15 +4,33 @@ import json
 import math
 import os
 import random
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, TimeoutError
+import re
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from prompts.self_improvement_prompt import find_selfimprove_eval_logs
-from self_improve_step import self_improve
 from utils.common_utils import load_json_file
-from utils.docker_utils import setup_logger
 from utils.evo_utils import load_dgm_metadata, is_compiled_self_improve
 
-def initialize_run(output_dir, prevrun_dir=None, polyglot=False, polyglot_initial_dir=None):
+SAFE_SWEBENCH_PRO_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def validate_swebench_pro_task_id(task_id):
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError(f"Invalid SWE-bench Pro task ID: {task_id!r}")
+    if task_id in {".", ".."} or not SAFE_SWEBENCH_PRO_ID_RE.fullmatch(task_id):
+        raise ValueError(f"Unsafe SWE-bench Pro task ID: {task_id!r}")
+    return task_id
+
+
+def initialize_run(
+    output_dir,
+    prevrun_dir=None,
+    polyglot=False,
+    polyglot_initial_dir=None,
+    swebench_pro=False,
+    swebench_pro_initial_dir=None,
+):
     # Initialize archive
     start_gen_num = 0
     if not prevrun_dir:
@@ -26,16 +44,65 @@ def initialize_run(output_dir, prevrun_dir=None, polyglot=False, polyglot_initia
 
     # Copy cached initial version into experiment dir.
     # DGM expects the selected initial metadata to live at output_dir/initial.
-    initial_folder_name = 'initial' if not polyglot else 'initial_polyglot'
-    initial_source = polyglot_initial_dir if polyglot and polyglot_initial_dir else initial_folder_name
+    if swebench_pro:
+        initial_folder_name = 'initial_swebench_pro'
+        initial_source = swebench_pro_initial_dir or initial_folder_name
+    elif polyglot:
+        initial_folder_name = 'initial_polyglot'
+        initial_source = polyglot_initial_dir or initial_folder_name
+    else:
+        initial_folder_name = 'initial'
+        initial_source = initial_folder_name
     initial_dest = os.path.join(output_dir, "initial")
     if not prevrun_dir and not os.path.exists(initial_dest):
         if os.path.exists(initial_source):
-            os.system(f"cp -r {initial_source}/ {initial_dest}")
+            if not os.path.isdir(initial_source):
+                raise RuntimeError(f"Initial source must be a directory: {initial_source}")
+            shutil.copytree(initial_source, initial_dest)
         else:
             raise RuntimeError(f"Error: Need to properly configure evaluation results for the initial version: {initial_source}")
 
     return archive, start_gen_num
+
+
+def load_task_ids_file(path):
+    data = load_json_file(path)
+    if isinstance(data, list) and all(isinstance(item, str) for item in data):
+        return [validate_swebench_pro_task_id(item) for item in data]
+    if isinstance(data, dict):
+        if isinstance(data.get("task_ids"), list):
+            return [validate_swebench_pro_task_id(item) for item in data["task_ids"] if isinstance(item, str)]
+        if isinstance(data.get("tasks"), list):
+            task_ids = []
+            for item in data["tasks"]:
+                if not isinstance(item, dict):
+                    continue
+                task_id = item.get("task_id") or item.get("instance_id")
+                if isinstance(task_id, str):
+                    task_ids.append(validate_swebench_pro_task_id(task_id))
+            return task_ids
+    raise ValueError(f"Unsupported task ID file: {path}")
+
+
+def validate_swebench_pro_paths(args):
+    checks = [
+        (args.swebench_pro_dataset_path, "SWE-bench Pro dataset", os.path.isfile),
+        (args.swebench_pro_task_map, "SWE-bench Pro task map", os.path.isfile),
+        (
+            os.path.join(args.swebench_pro_eval_source, "swe_bench_pro_eval.py"),
+            "SWE-bench Pro evaluator script",
+            os.path.isfile,
+        ),
+        (
+            args.swebench_pro_scripts_dir
+            or os.path.join(args.swebench_pro_eval_source, "run_scripts"),
+            "SWE-bench Pro run_scripts directory",
+            os.path.isdir,
+        ),
+    ]
+    missing = [f"{label}: {path}" for path, label, predicate in checks if not predicate(path)]
+    if missing:
+        raise FileNotFoundError("Invalid SWE-bench Pro configuration:\n" + "\n".join(missing))
 
 def any_exceeding_context_length(output_dir, commit_id, instance_ids):
     """
@@ -125,7 +192,10 @@ def choose_selfimproves(output_dir, archive, selfimprove_size, method='random', 
             num_total_ids = len(empty_ids) + len(resolved_ids) + len(unresolved_ids)
 
             # Solve empty patches
-            if len(empty_ids) >= 0.1 * num_total_ids and random.random() < 0.25:
+            if empty_ids and (
+                not unresolved_ids
+                or (len(empty_ids) >= 0.1 * num_total_ids and random.random() < 0.25)
+            ):
                 entry = 'solve_empty_patches'
                 selfimprove_entries.append((parent_commit, entry))
                 continue
@@ -144,7 +214,7 @@ def choose_selfimproves(output_dir, archive, selfimprove_size, method='random', 
                 continue
 
             # Choose a random unresolved entry
-            if unresolved_ids == 0:
+            if not unresolved_ids:
                 continue
             entry_ids = unresolved_ids
         entry = random.choice(entry_ids)
@@ -192,13 +262,13 @@ def update_archive(output_dir, archive, new_ids, method='keep_all', noise_leeway
 
     return archive
 
-def get_full_eval_threshold(output_dir, archive):
+def get_full_eval_threshold(output_dir, archive, full_eval_count=None):
     """
     Get the threshold for full evaluation.
     """
     archive_scores = []
-    num_full_eval = sum(len(load_json_file(f"./swe_bench/subsets/{size}.json"))
-                       for size in ['small', 'medium', 'big'])
+    num_full_eval = full_eval_count or sum(len(load_json_file(f"./swe_bench/subsets/{size}.json"))
+                                           for size in ['small', 'medium', 'big'])
 
     # Get original score
     original_score = get_original_score(output_dir)
@@ -238,6 +308,7 @@ def main():
     parser.add_argument('--post_improve_diagnose', default=False, action='store_true', help='Diagnose the self-improvement after evaluation')
     parser.add_argument("--shallow_eval", default=False, action='store_true', help="Run single shallow evaluation for self-improvement on swe.")
     parser.add_argument("--polyglot", default=False, action='store_true', help="Run single shallow evaluation for self-improvement on swe.")
+    parser.add_argument("--swebench_pro", default=False, action='store_true', help="Run DGM self-improvement on SWE-bench Pro.")
     parser.add_argument("--eval_noise", type=float, default=0.1, help="Noise leeway for evaluation.")
     parser.add_argument("--no_full_eval", default=False, action='store_true', help="Do not run full evaluation on swe if a node is the top N highest performing.")
     parser.add_argument(
@@ -264,9 +335,81 @@ def main():
         default=os.getenv("DGM_POLYGLOT_INITIAL_DIR"),
         help="Initial Polyglot metadata directory to seed output_dgm/<run>/initial.",
     )
+    parser.add_argument(
+        "--swebench_pro_dataset_path",
+        type=str,
+        default=os.getenv(
+            "DGM_SWEBENCH_PRO_DATASET",
+            "../../benchmarks/swebench_pro/dataset/test.jsonl",
+        ),
+        help="SWE-bench Pro raw sample JSONL.",
+    )
+    parser.add_argument(
+        "--swebench_pro_task_map",
+        type=str,
+        default=os.getenv(
+            "DGM_SWEBENCH_PRO_TASK_MAP",
+            "../../benchmarks/swebench_pro/task_maps/swebench_pro_test_50_seed0_v1.json",
+        ),
+        help="SWE-bench Pro task map JSON.",
+    )
+    parser.add_argument(
+        "--swebench_pro_initial_dir",
+        type=str,
+        default=os.getenv("DGM_SWEBENCH_PRO_INITIAL_DIR"),
+        help="Initial SWE-bench Pro metadata directory to seed output_dgm/<run>/initial.",
+    )
+    parser.add_argument(
+        "--swebench_pro_eval_source",
+        type=str,
+        default=os.getenv("DGM_SWEBENCH_PRO_EVAL_SOURCE", "../../third_party/SWE-bench_Pro-os"),
+        help="Path to the official SWE-bench Pro evaluator checkout.",
+    )
+    parser.add_argument(
+        "--swebench_pro_scripts_dir",
+        type=str,
+        default=os.getenv("DGM_SWEBENCH_PRO_SCRIPTS_DIR"),
+        help="Path to SWE-bench Pro run_scripts. Defaults to <eval_source>/run_scripts.",
+    )
+    parser.add_argument(
+        "--swebench_pro_dockerhub_username",
+        type=str,
+        default=os.getenv("DGM_SWEBENCH_PRO_DOCKERHUB_USERNAME", "jefzda"),
+        help="Docker Hub username containing sweap-images.",
+    )
+    parser.add_argument(
+        "--swebench_pro_docker_platform",
+        type=str,
+        default=os.getenv("DGM_SWEBENCH_PRO_DOCKER_PLATFORM"),
+        help="Optional Docker platform override, e.g. linux/amd64.",
+    )
+    parser.add_argument(
+        "--swebench_pro_block_network",
+        default=False,
+        action='store_true',
+        help="Block network inside official SWE-bench Pro evaluation containers.",
+    )
+    parser.add_argument(
+        "--swebench_pro_no_local_docker",
+        default=False,
+        action='store_true',
+        help="Use Modal instead of local Docker for official SWE-bench Pro evaluation.",
+    )
+    parser.add_argument(
+        "--swebench_pro_stage_size",
+        type=int,
+        default=int(os.getenv("DGM_SWEBENCH_PRO_STAGE_SIZE", "10")),
+        help="First-stage task count when not using --shallow_eval.",
+    )
     # baselines
     parser.add_argument("--run_baseline", type=str, default=None, choices=['no_selfimprove', 'no_darwin'], help="Baseline to run.")
     args = parser.parse_args()
+
+    if args.polyglot and args.swebench_pro:
+        parser.error("--polyglot and --swebench_pro cannot both be set")
+
+    from self_improve_step import self_improve
+    from utils.docker_utils import setup_logger
 
     # Variables for this DGM run
     if not args.continue_from:
@@ -283,10 +426,23 @@ def main():
         prevrun_dir=args.continue_from,
         polyglot=args.polyglot,
         polyglot_initial_dir=args.polyglot_initial_dir,
+        swebench_pro=args.swebench_pro,
+        swebench_pro_initial_dir=args.swebench_pro_initial_dir,
     )
 
     # SWE issues to consider
-    if not args.polyglot:
+    swebench_pro_all_ids = None
+    if args.swebench_pro:
+        validate_swebench_pro_paths(args)
+        swebench_pro_all_ids = load_task_ids_file(args.swebench_pro_task_map)
+        if args.shallow_eval:
+            swe_issues_sm = swebench_pro_all_ids
+            swe_issues_med = []
+        else:
+            stage_size = max(1, min(args.swebench_pro_stage_size, len(swebench_pro_all_ids)))
+            swe_issues_sm = swebench_pro_all_ids[:stage_size]
+            swe_issues_med = swebench_pro_all_ids[stage_size:]
+    elif not args.polyglot:
         swe_issues_sm = load_json_file("./swe_bench/subsets/small.json")
         swe_issues_med = load_json_file("./swe_bench/subsets/medium.json")
     else:
@@ -325,7 +481,20 @@ def main():
                     test_more_threshold=None if args.shallow_eval else test_more_threshold,
                     test_task_list_more=None if args.shallow_eval else swe_issues_med,
                     polyglot=args.polyglot,
-                    full_eval_threshold=None if args.no_full_eval else get_full_eval_threshold(output_dir, archive),
+                    swebench_pro=args.swebench_pro,
+                    swebench_pro_dataset_path=args.swebench_pro_dataset_path,
+                    swebench_pro_task_map=args.swebench_pro_task_map,
+                    swebench_pro_eval_source=args.swebench_pro_eval_source,
+                    swebench_pro_scripts_dir=args.swebench_pro_scripts_dir,
+                    swebench_pro_dockerhub_username=args.swebench_pro_dockerhub_username,
+                    swebench_pro_use_local_docker=not args.swebench_pro_no_local_docker,
+                    swebench_pro_docker_platform=args.swebench_pro_docker_platform,
+                    swebench_pro_block_network=args.swebench_pro_block_network,
+                    full_eval_threshold=None if args.no_full_eval else get_full_eval_threshold(
+                        output_dir,
+                        archive,
+                        full_eval_count=len(swebench_pro_all_ids) if swebench_pro_all_ids else None,
+                    ),
                     run_baseline=args.run_baseline,
                 )
                 for parent_commit, entry in selfimprove_entries

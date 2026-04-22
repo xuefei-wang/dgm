@@ -10,6 +10,7 @@ import copy
 from dotenv import load_dotenv
 
 from llm import (
+    MAX_OUTPUT_TOKENS,
     create_client,
     get_response_from_llm,
     is_openai_responses_model,
@@ -21,7 +22,8 @@ from tools import load_all_tools
 
 
 def _load_shared_env() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
+    path = Path(__file__).resolve()
+    repo_root = path.parents[2] if len(path.parents) > 2 else path.parent
     env_paths = [
         repo_root / "configs" / "providers" / ".env.shared",
         repo_root / "configs" / "providers" / ".env.haiku",
@@ -36,7 +38,7 @@ def _load_shared_env() -> None:
 _load_shared_env()
 
 CLAUDE_MODEL = os.getenv('DGM_CLAUDE_MODEL', 'bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0')
-OPENAI_MODEL = os.getenv('DGM_OPENAI_MODEL', 'o3-mini-2025-01-31')
+OPENAI_MODEL = os.getenv('DGM_OPENAI_MODEL', 'gpt-5.4-mini')
 
 
 def response_output_text(response):
@@ -84,6 +86,7 @@ def get_response_withtools(
             response_kwargs = {
                 "model": model,
                 "input": messages,
+                "max_output_tokens": MAX_OUTPUT_TOKENS,
                 "tool_choice": tool_choice,
                 "tools": tools,
                 "parallel_tool_calls": False,
@@ -473,7 +476,7 @@ def chat_with_agent_claude(
 
 def chat_with_agent_openai(
         msg,
-        model='o3-mini-2025-01-31',
+        model='gpt-5.4-mini',
         msg_history=None,
         logging=print,
     ):
@@ -534,7 +537,10 @@ def chat_with_agent_openai(
                     break
             if tool_call is None:
                 break
-            new_msg_history.append(tool_call)
+            for output_item in response.output:
+                new_msg_history.append(output_item)
+                if output_item is tool_call:
+                    break
             new_msg_history.append({
                 "type": "function_call_output",
                 "call_id": tool_use['tool_id'],

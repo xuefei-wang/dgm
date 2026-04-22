@@ -73,6 +73,7 @@ Your task is to identify ONE detailed plan that would improve the agent's coding
 
 swe_issue_prompt = "Here is the log for the coding agent trying to solve the GitHub issues but failed."
 polyglot_issue_prompt = "Here is the log for the coding agent trying to solve a programming task. A task is in one programming language, but the coding agent needs to deal with different languages including C++, Go, Java, JavaScript, Python, and Rust."
+swebench_pro_issue_prompt = "Here is the log for the coding agent trying to solve a SWE-bench Pro task but failed."
 
 diagnose_prompt = """
 # Agent Running Log
@@ -113,6 +114,46 @@ Respond precisely in the following format including the JSON start and end marke
 In <JSON>, provide a JSON response with the following fields:
 - "log_summarization": Analyze the above logs and summarize how the agent tried to solve the GitHub issue. Note which tools and how they are used, the agent's problem-solving approach, and any issues encountered.
 - "potential_improvements": Identify potential improvements to the coding agent that could enhance its coding capabilities. Focus on the agent's general coding abilities (e.g., better or new tools usable across any repository) rather than issue-specific fixes (e.g., tools only usable in one framework). All necessary dependencies and environment setup have already been handled, so do not focus on these aspects.
+- "improvement_proposal": Choose ONE high-impact improvement from the identified potential improvements and describe it in detail. This should be a focused and comprehensive plan to enhance the agent's overall coding ability.
+- "implementation_suggestion": Referring to the coding agent's summary and implementation, think critically about what feature or tool could be added or improved to best implement the proposed improvement. If the proposed feature can be implemented by modifying the existing tools, describe the modifications needed, instead of suggesting a new tool.
+- "problem_description": Phrase the improvement proposal and implementation suggestion as a GitHub issue description. It should clearly describe the feature so that a software engineer viewing the issue and the repository can implement it.
+
+Your response will be automatically parsed, so ensure that the string response is precisely in the correct format. Do NOT include the `<JSON>` tag in your output."""
+
+diagnose_prompt_swebench_pro = """
+# Agent Running Log
+----- Agent Running Log Start -----
+{md_log}
+----- Agent Running Log End -----
+
+# SWE-bench Pro Task
+The public task information that the agent is trying to solve.
+----- SWE-bench Pro Task Start -----
+{task_description}
+----- SWE-bench Pro Task End -----
+
+# Predicted Patch
+The agent's predicted patch to solve the task.
+----- Predicted Patch Start -----
+{predicted_patch}
+----- Predicted Patch End -----
+
+# Evaluation Results
+The generated evaluation summary for this attempt. Do not assume access to
+private test source code or gold patches.
+----- Evaluation Results Start -----
+{eval_log}
+----- Evaluation Results End -----
+
+Respond precisely in the following format including the JSON start and end markers:
+
+```json
+<JSON>
+```
+
+In <JSON>, provide a JSON response with the following fields:
+- "log_summarization": Analyze the above logs and summarize how the agent tried to solve the task. Note which tools and how they are used, the agent's problem-solving approach, and any issues encountered.
+- "potential_improvements": Identify potential improvements to the coding agent that could enhance its coding capabilities. Focus on the agent's general coding abilities rather than task-specific fixes. All necessary dependencies and environment setup have already been handled, so do not focus on these aspects.
 - "improvement_proposal": Choose ONE high-impact improvement from the identified potential improvements and describe it in detail. This should be a focused and comprehensive plan to enhance the agent's overall coding ability.
 - "implementation_suggestion": Referring to the coding agent's summary and implementation, think critically about what feature or tool could be added or improved to best implement the proposed improvement. If the proposed feature can be implemented by modifying the existing tools, describe the modifications needed, instead of suggesting a new tool.
 - "problem_description": Phrase the improvement proposal and implementation suggestion as a GitHub issue description. It should clearly describe the feature so that a software engineer viewing the issue and the repository can implement it.
@@ -334,6 +375,54 @@ def get_diagnose_prompt_swe(entry_id, commit, root_dir, out_dir, dataset, patch_
     diagnose_system_message_out = coding_agent_summary + diagnose_system_message.format(code=code_text)
 
     return diagnose_system_message_out, diagnose_prompt_out
+
+
+def _swebench_pro_task_description(entry):
+    fields = [
+        ("Repository", entry.get("repo")),
+        ("Language", entry.get("repo_language")),
+        ("Problem Statement", entry.get("problem_statement")),
+        ("Requirements", entry.get("requirements")),
+        ("Interface", entry.get("interface")),
+    ]
+    parts = []
+    for label, value in fields:
+        if value:
+            parts.append(f"## {label}\n{value}")
+    return "\n\n".join(parts)
+
+
+def get_diagnose_prompt_swebench_pro(entry_id, commit, root_dir, out_dir, dataset, patch_files=[]):
+    if entry_id == 'solve_empty_patches':
+        diagnose_prompt_out = diagnose_prompt_emptypatches
+    elif entry_id == 'solve_stochasticity':
+        diagnose_prompt_out = diagnose_prompt_stochasticity
+    elif entry_id == 'solve_contextlength':
+        diagnose_prompt_out = diagnose_prompt_contextlength
+    else:
+        md_logs, eval_logs, predicted_patches, eval_results = find_selfimprove_eval_logs(entry_id, out_dir, commit_id=commit)
+        md_log, eval_log, predicted_patch, _ = process_selfimprove_eval_logs(md_logs, eval_logs, predicted_patches, eval_results)
+        entry = next((e for e in dataset if e['instance_id'] == entry_id), None)
+        assert entry, f"Could not find entry with id {entry_id} in dataset."
+        diagnose_prompt_out = swebench_pro_issue_prompt + diagnose_prompt_swebench_pro.format(
+            md_log=md_log,
+            eval_log=eval_log,
+            predicted_patch=predicted_patch,
+            task_description=_swebench_pro_task_description(entry),
+        )
+
+    code_files = ['coding_agent.py', 'tools/', 'utils/']
+    exclude_files = [
+        'utils/evo_utils.py',
+        'utils/docker_utils.py',
+        'utils/swe_log_parsers.py',
+        'prompts/self_improvement_prompt.py',
+    ]
+    code_text = get_current_code(root_dir, code_files, patch_files=patch_files, exclude_files=exclude_files)
+    diagnose_system_message_out = coding_agent_summary + diagnose_system_message.format(code=code_text)
+
+    return diagnose_system_message_out, diagnose_prompt_out
+
 
 def get_diagnose_prompt_polyglot(entry_id, commit, root_dir, out_dir, dataset, patch_files=[]):
 

@@ -22,6 +22,7 @@ AVAILABLE_LLMS = [
     "o1-mini-2024-09-12",
     "o1-2024-12-17",
     "o3-mini-2025-01-31",
+    "gpt-5.4-mini",
     # OpenRouter models
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
@@ -45,7 +46,8 @@ AVAILABLE_LLMS = [
 
 
 def _load_shared_env() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
+    path = Path(__file__).resolve()
+    repo_root = path.parents[2] if len(path.parents) > 2 else path.parent
     env_paths = [
         repo_root / "configs" / "providers" / ".env.shared",
         repo_root / "configs" / "providers" / ".env.haiku",
@@ -64,9 +66,18 @@ def is_openai_responses_model(model: str) -> bool:
     return model.startswith(("gpt-5", "gpt-4.1", "o1-", "o3-", "o4-"))
 
 
+def is_openai_reasoning_model(model: str) -> bool:
+    return model.startswith(("gpt-5", "o1-", "o3-", "o4-")) or model in {"o1", "o3", "o4"}
+
+
 def openai_reasoning_config(model: str):
-    effort = (os.getenv("DGM_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or "").strip()
-    if not effort or not is_openai_responses_model(model):
+    effort = (
+        os.getenv("DGM_REASONING_EFFORT")
+        or os.getenv("OPENAI_REASONING_EFFORT")
+        or os.getenv("REASONING_EFFORT")
+        or "medium"
+    ).strip()
+    if not effort or not is_openai_reasoning_model(model):
         return None
     return {"effort": effort}
 
