@@ -24,12 +24,36 @@ except Exception:  # pragma: no cover - optional when only using helper function
 
 
 DGM_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(DGM_ROOT) not in sys.path:
     sys.path.insert(0, str(DGM_ROOT))
-DEFAULT_DATASET_PATH = REPO_ROOT / "benchmarks" / "swebench_pro" / "dataset" / "test.jsonl"
-DEFAULT_TASK_MAP = REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "swebench_pro_test_50_seed0_v1.json"
-DEFAULT_EVAL_SOURCE = REPO_ROOT / "third_party" / "SWE-bench_Pro-os"
+
+
+def _find_repo_root() -> Path:
+    env_root = os.getenv("SWARMS_ROOT") or os.getenv("DGM_SWARMS_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    for candidate in [DGM_ROOT, *DGM_ROOT.parents]:
+        if (candidate / "benchmarks" / "swebench_pro").exists() or (candidate / "third_party" / "SWE-bench_Pro-os").exists():
+            return candidate
+    return DGM_ROOT.parents[2] if len(DGM_ROOT.parents) > 2 else DGM_ROOT
+
+
+REPO_ROOT = _find_repo_root()
+DEFAULT_DATASET_PATH = Path(
+    os.getenv(
+        "DGM_SWEBENCH_PRO_DATASET",
+        REPO_ROOT / "benchmarks" / "swebench_pro" / "dataset" / "test.jsonl",
+    )
+)
+DEFAULT_TASK_MAP = Path(
+    os.getenv(
+        "DGM_SWEBENCH_PRO_TASK_MAP",
+        REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "swebench_pro_test_50_seed0_v1.json",
+    )
+)
+DEFAULT_EVAL_SOURCE = Path(
+    os.getenv("DGM_SWEBENCH_PRO_EVAL_SOURCE", REPO_ROOT / "third_party" / "SWE-bench_Pro-os")
+)
 DEFAULT_SCRIPTS_DIR = DEFAULT_EVAL_SOURCE / "run_scripts"
 DEFAULT_DOCKERHUB_USERNAME = "jefzda"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -88,6 +112,7 @@ def _runtime_env() -> dict[str, str]:
             "DGM_DIAGNOSE_MODEL",
             "DGM_REASONING_EFFORT",
             "OPENAI_REASONING_EFFORT",
+            "REASONING_EFFORT",
         ]
     )
 
@@ -657,16 +682,21 @@ def _run_official_eval(
             cmd.extend(["--docker_platform", docker_platform])
         if block_network:
             cmd.append("--block_network")
-    subprocess.run(cmd, check=True)
+    run_kwargs: dict[str, Any] = {}
+    if not wrapper.exists():
+        run_env = os.environ.copy()
+        run_env["PYTHONPATH"] = str(eval_source) + os.pathsep + run_env.get("PYTHONPATH", "")
+        run_kwargs = {"cwd": str(eval_source), "env": run_env}
+    subprocess.run(cmd, check=True, **run_kwargs)
 
 
-def _load_eval_results(official_eval_dir: Path) -> dict[str, bool]:
+def _load_eval_results(official_eval_dir: Path) -> dict[str, bool] | None:
     eval_results_path = official_eval_dir / "eval_results.json"
     if not eval_results_path.exists():
-        return {}
+        return None
     data = json.loads(eval_results_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        return {}
+        return None
     return {validate_instance_id(key): bool(value) for key, value in data.items()}
 
 
@@ -750,7 +780,15 @@ def _write_eval_logs(
             )
             continue
 
-        resolved = eval_results.get(instance_id)
+        if instance_id not in eval_results:
+            _update_prediction(json_path, eval_result="error")
+            (out_dname / f"{instance_filename}_eval.md").write_text(
+                "Evaluation result was missing from the official SWE-bench Pro output.",
+                encoding="utf-8",
+            )
+            continue
+
+        resolved = eval_results[instance_id]
         eval_result = "resolved" if resolved else "unresolved"
         _update_prediction(json_path, eval_result=eval_result)
 
@@ -778,14 +816,22 @@ def build_report(entries: list[dict[str, Any]], results: list[dict[str, Any]], e
     ]
     eval_results = {validate_instance_id(instance_id): resolved for instance_id, resolved in eval_results.items()}
     resolved_ids = sorted(instance_id for instance_id, resolved in eval_results.items() if resolved)
+    missing_eval_ids = [
+        validate_instance_id(result["instance_id"])
+        for result in results
+        if result.get("success")
+        and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
+        and validate_instance_id(result["instance_id"]) not in eval_results
+    ]
     unresolved_ids = sorted(
         validate_instance_id(result["instance_id"])
         for result in results
         if result.get("success")
         and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
-        and not eval_results.get(validate_instance_id(result["instance_id"]), False)
+        and validate_instance_id(result["instance_id"]) in eval_results
+        and not eval_results[validate_instance_id(result["instance_id"])]
     )
-    error_ids = sorted(set(incomplete_ids))
+    error_ids = sorted(set(incomplete_ids) | set(missing_eval_ids))
 
     return {
         "total_instances": len(entries),
@@ -899,6 +945,8 @@ def harness(
                 block_network=block_network,
             )
             eval_results = _load_eval_results(official_eval_dir)
+            if eval_results is None:
+                raise RuntimeError(f"Official SWE-bench Pro eval results missing from {official_eval_dir}")
 
         _write_eval_logs(
             entries_by_id=entries_by_id,
@@ -924,6 +972,8 @@ def main() -> None:
     parser.add_argument("--max-workers", type=int, default=5)
     parser.add_argument("--model-name", "--model-name-or-path", dest="model_name_or_path", default=None)
     parser.add_argument("--model-patch-paths", default=None, help="Comma-separated DGM model patches.")
+    parser.add_argument("--test-task-list", type=Path, default=None, help="JSON file with task IDs or task objects to evaluate.")
+    parser.add_argument("--task-ids", default=None, help="Comma-separated SWE-bench Pro task IDs to evaluate.")
     parser.add_argument("--num-evals", type=int, default=1)
     parser.add_argument("--pred-dname", type=Path, default=Path("./swe_bench_pro/predictions"))
     parser.add_argument("--output-dir", type=Path, default=Path("./swe_bench_pro/reports"))
@@ -936,9 +986,15 @@ def main() -> None:
     args = parser.parse_args()
 
     model_patch_paths = args.model_patch_paths.split(",") if args.model_patch_paths else None
+    test_task_list = None
+    if args.task_ids:
+        test_task_list = [validate_instance_id(task_id.strip()) for task_id in args.task_ids.split(",") if task_id.strip()]
+    elif args.test_task_list:
+        test_task_list = load_task_ids(args.test_task_list)
     harness(
         dataset_path=args.dataset_path,
         task_map=args.task_map,
+        test_task_list=test_task_list,
         num_samples=args.num_samples,
         max_workers=args.max_workers,
         model_name_or_path=args.model_name_or_path,

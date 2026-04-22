@@ -66,9 +66,18 @@ def is_openai_responses_model(model: str) -> bool:
     return model.startswith(("gpt-5", "gpt-4.1", "o1-", "o3-", "o4-"))
 
 
+def is_openai_reasoning_model(model: str) -> bool:
+    return model.startswith(("gpt-5", "o1-", "o3-", "o4-")) or model in {"o1", "o3", "o4"}
+
+
 def openai_reasoning_config(model: str):
-    effort = (os.getenv("DGM_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or "medium").strip()
-    if not effort or not is_openai_responses_model(model):
+    effort = (
+        os.getenv("DGM_REASONING_EFFORT")
+        or os.getenv("OPENAI_REASONING_EFFORT")
+        or os.getenv("REASONING_EFFORT")
+        or "medium"
+    ).strip()
+    if not effort or not is_openai_reasoning_model(model):
         return None
     return {"effort": effort}
 

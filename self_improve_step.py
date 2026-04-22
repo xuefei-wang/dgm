@@ -104,16 +104,22 @@ def _read_container_head_commit(container):
     return commit_hash
 
 
-def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
+def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False, swebench_pro=False):
     from llm import create_client, get_response_from_llm, extract_json_between_markers
     from prompts.self_improvement_prompt import (
         get_diagnose_prompt_polyglot,
         get_diagnose_prompt_swe,
+        get_diagnose_prompt_swebench_pro,
         get_problem_description_prompt,
     )
 
     client = create_client(diagnose_model)
-    if polyglot:
+    if swebench_pro:
+        diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_swebench_pro(
+            entry, commit, root_dir, out_dir, dataset,
+            patch_files=patch_files,
+        )
+    elif polyglot:
         diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_polyglot(
             entry, commit, root_dir, out_dir, dataset,
             patch_files=patch_files,
@@ -146,6 +152,7 @@ def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attem
                 patch_files=patch_files,
                 max_attempts=max_attempts-1,
                 polyglot=polyglot,
+                swebench_pro=swebench_pro,
             )
         else:
             return None
@@ -378,7 +385,7 @@ def run_harness_swebench_pro(
 
     if (overall_performance and
         test_more_threshold is not None and test_task_list_more and
-            overall_performance.get('total_resolved_instances', 0) >= len(test_task_list) * test_more_threshold):
+            overall_performance.get('accuracy_score', 0) >= test_more_threshold):
         safe_log("Start additional SWE-bench Pro evaluation cycle")
         dnames, performances, overall_performance = evaluate_phase('stage2', test_task_list_more)
         metadata.setdefault('swe_dnames_deep', []).extend(str(dn) for dn in dnames)
@@ -526,7 +533,15 @@ def self_improve(
     # Get tasks to improve
     if entry:
         safe_log(f"Task to improve: {entry}")
-        problem_statement = diagnose_problem(entry, parent_commit, root_dir, out_dir_base, patch_files=patch_files, polyglot=polyglot)
+        problem_statement = diagnose_problem(
+            entry,
+            parent_commit,
+            root_dir,
+            out_dir_base,
+            patch_files=patch_files,
+            polyglot=polyglot,
+            swebench_pro=swebench_pro,
+        )
         safe_log(f"problem_statement: {problem_statement}")
     else:
         safe_log("No entry provided. Exiting.")
@@ -565,6 +580,7 @@ def self_improve(
         "DGM_DIAGNOSE_MODEL",
         "DGM_REASONING_EFFORT",
         "OPENAI_REASONING_EFFORT",
+        "REASONING_EFFORT",
     ])
     cmd = [
         "timeout", "1800",  # 30min timeout
