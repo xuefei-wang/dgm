@@ -565,6 +565,7 @@ def self_improve(
         "DGM_DIAGNOSE_MODEL",
         "DGM_REASONING_EFFORT",
         "OPENAI_REASONING_EFFORT",
+        "REASONING_EFFORT",
     ])
     cmd = [
         "timeout", "1800",  # 30min timeout
