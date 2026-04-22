@@ -1,27 +1,13 @@
 import argparse
 import datetime
 import json
+import logging
 import os
 from pathlib import Path
-import docker
 from dotenv import load_dotenv
 
-from llm import create_client, get_response_from_llm, extract_json_between_markers
-from prompts.self_improvement_prompt import get_diagnose_prompt_polyglot, get_diagnose_prompt_swe, get_problem_description_prompt
-from prompts.diagnose_improvement_prompt import get_diagnose_improvement_prompt
-from prompts.testrepo_prompt import get_test_description
 from utils.common_utils import load_json_file
 from utils.evo_utils import get_model_patch_paths, get_all_performance, is_compiled_self_improve
-from utils.docker_utils import (
-    build_dgm_container,
-    cleanup_container,
-    copy_from_container,
-    copy_to_container,
-    log_container_output,
-    remove_existing_container,
-    setup_logger,
-    safe_log,
-)
 
 dataset = None
 
@@ -58,6 +44,41 @@ def _load_swebench_pro_dataset(dataset_path):
     return entries
 
 
+def setup_logger(log_file):
+    from utils.docker_utils import setup_logger as docker_setup_logger
+
+    return docker_setup_logger(log_file)
+
+
+def safe_log(message: str, level: int = logging.INFO):
+    try:
+        from utils.docker_utils import safe_log as docker_safe_log
+    except ModuleNotFoundError as exc:
+        if exc.name != "docker":
+            raise
+        print(message)
+        return
+
+    docker_safe_log(message, level)
+
+
+def log_container_output(exec_result):
+    """
+    Log output from a Docker container execution, handling both streaming and non-streaming cases.
+    """
+    if isinstance(exec_result.output, bytes):
+        safe_log(f"Container output: {exec_result.output.decode()}")
+    else:
+        for chunk in exec_result.output:
+            if chunk:
+                safe_log(f"Container output: {chunk.decode().strip()}")
+
+    if exec_result.exit_code and exec_result.exit_code != 0:
+        error_msg = f"Script failed with exit code {exec_result.exit_code}"
+        safe_log(error_msg, logging.ERROR)
+        raise Exception(error_msg)
+
+
 _load_shared_env()
 diagnose_model = os.getenv('DGM_DIAGNOSE_MODEL', 'o1-2024-12-17')
 
@@ -84,6 +105,13 @@ def _read_container_head_commit(container):
 
 
 def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
+    from llm import create_client, get_response_from_llm, extract_json_between_markers
+    from prompts.self_improvement_prompt import (
+        get_diagnose_prompt_polyglot,
+        get_diagnose_prompt_swe,
+        get_problem_description_prompt,
+    )
+
     client = create_client(diagnose_model)
     if polyglot:
         diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_polyglot(
@@ -143,6 +171,9 @@ def diagnose_improvement(
     Returns:
         dict: The improvement diagnosis.
     """
+    from llm import create_client, get_response_from_llm, extract_json_between_markers
+    from prompts.diagnose_improvement_prompt import get_diagnose_improvement_prompt
+
     client = create_client(diagnose_model)
     diagnose_sys_message, diagnose_prompt = get_diagnose_improvement_prompt(
         entry, parent_commit, root_dir, model_patch_file, out_dir, run_id, dataset,
@@ -433,6 +464,15 @@ def self_improve(
     logger = setup_logger(os.path.join(output_dir, "self_improve.log"))
 
     # Create and start the Docker container
+    import docker
+    from utils.docker_utils import (
+        build_dgm_container,
+        cleanup_container,
+        copy_from_container,
+        copy_to_container,
+        remove_existing_container,
+    )
+
     image_name = "dgm"
     container_name = f"dgm-container-{run_id}"
     client = docker.from_env()
@@ -505,6 +545,7 @@ def self_improve(
 
     # Run self-improvement
     safe_log("Running self-improvement")
+    from prompts.testrepo_prompt import get_test_description
     chat_history_file_container = "/dgm/self_evo.md"
     test_description = get_test_description(swerepo=False)
     env_vars = _collect_runtime_env([
