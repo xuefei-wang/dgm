@@ -62,7 +62,7 @@ _load_shared_env()
 
 
 def is_openai_responses_model(model: str) -> bool:
-    return model.startswith(("gpt-5", "gpt-4.1", "o1-", "o3-", "o4-"))
+    return model.startswith(("gpt-5", "gpt-4.1", "o1-", "o3-", "o4-")) or model in {"o1", "o3", "o4"}
 
 
 def is_openai_reasoning_model(model: str) -> bool:
@@ -201,7 +201,7 @@ def create_client(model: str):
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
-    elif 'gpt' in model or model.startswith(("o1-", "o3-", "o4-")):
+    elif 'gpt' in model or model.startswith(("o1-", "o3-", "o4-")) or model in {"o1", "o3", "o4"}:
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
     elif model.startswith("deepseek-"):
@@ -434,7 +434,6 @@ def get_response_from_llm(
         log_token_usage(logging, response, model, "get_response_from_llm")
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-        reasoning_content = response.choices[0].message.reasoning_content
     elif model.startswith("llama3.1-"):
         llama_size = model.split("-")[-1]
         client_model = f"meta-llama/llama-3.1-{llama_size}-instruct"
@@ -453,7 +452,6 @@ def get_response_from_llm(
         log_token_usage(logging, response, client_model, "get_response_from_llm")
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-        resoning_content = response.choices[0].message.reasoning_content
     else:
         raise ValueError(f"Model {model} not supported.")
     if print_debug:

@@ -49,7 +49,7 @@ def _collect_runtime_env(names):
 
 
 _load_shared_env()
-diagnose_model = os.getenv('DGM_DIAGNOSE_MODEL', 'o1-2024-12-17')
+diagnose_model = os.getenv('DGM_DIAGNOSE_MODEL', os.getenv('DGM_OPENAI_MODEL', 'gpt-5.4-mini'))
 
 def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
     client = create_client(diagnose_model)
@@ -389,6 +389,7 @@ def self_improve(
         "DGM_DIAGNOSE_MODEL",
         "DGM_REASONING_EFFORT",
         "OPENAI_REASONING_EFFORT",
+        "REASONING_EFFORT",
     ])
     cmd = [
         "timeout", "1800",  # 30min timeout

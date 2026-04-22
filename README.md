@@ -68,6 +68,16 @@ python DGM_outer.py
 ```
 By default, outputs will be saved in the `output_dgm/` directory.
 
+## Model Configuration
+DGM defaults OpenAI-backed coding, diagnosis, and tie-breaker calls to
+`gpt-5.4-mini` with `medium` reasoning effort. Override the default OpenAI
+model with `DGM_OPENAI_MODEL`, or set path-specific values such as
+`DGM_SELF_IMPROVE_MODEL`, `DGM_CODE_MODEL`, `DGM_DIAGNOSE_MODEL`, and
+`DGM_TIE_BREAKER_MODEL`.
+
+Reasoning effort is read in this order: `DGM_REASONING_EFFORT`,
+`OPENAI_REASONING_EFFORT`, then `REASONING_EFFORT`.
+
 ## File Structure
 - `analysis/` scripts used for plotting and analysis
 - `initial/` SWE-bench logs and performance of the initial agent
