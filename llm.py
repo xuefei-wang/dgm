@@ -22,6 +22,7 @@ AVAILABLE_LLMS = [
     "o1-mini-2024-09-12",
     "o1-2024-12-17",
     "o3-mini-2025-01-31",
+    "gpt-5.4-mini",
     # OpenRouter models
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
@@ -65,7 +66,7 @@ def is_openai_responses_model(model: str) -> bool:
 
 
 def openai_reasoning_config(model: str):
-    effort = (os.getenv("DGM_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or "").strip()
+    effort = (os.getenv("DGM_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or "medium").strip()
     if not effort or not is_openai_responses_model(model):
         return None
     return {"effort": effort}
