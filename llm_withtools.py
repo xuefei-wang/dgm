@@ -10,6 +10,7 @@ import copy
 from dotenv import load_dotenv
 
 from llm import (
+    MAX_OUTPUT_TOKENS,
     create_client,
     get_response_from_llm,
     is_openai_responses_model,
@@ -84,6 +85,7 @@ def get_response_withtools(
             response_kwargs = {
                 "model": model,
                 "input": messages,
+                "max_output_tokens": MAX_OUTPUT_TOKENS,
                 "tool_choice": tool_choice,
                 "tools": tools,
                 "parallel_tool_calls": False,
@@ -534,7 +536,10 @@ def chat_with_agent_openai(
                     break
             if tool_call is None:
                 break
-            new_msg_history.append(tool_call)
+            for output_item in response.output:
+                new_msg_history.append(output_item)
+                if output_item is tool_call:
+                    break
             new_msg_history.append({
                 "type": "function_call_output",
                 "call_id": tool_use['tool_id'],
