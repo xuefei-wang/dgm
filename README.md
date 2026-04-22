@@ -26,6 +26,10 @@ Repository for **Darwin Gödel Machine (DGM)**, a novel self-improving system th
 # API keys, add to ~/.bashrc
 export OPENAI_API_KEY='...'
 export ANTHROPIC_API_KEY='...'
+
+# DGM_CLAUDE_MODEL defaults to an Anthropic Bedrock route, which requires AWS
+# credentials. For direct Anthropic API runs, choose the coding model explicitly.
+export DGM_CODE_MODEL='claude-haiku-4-5-20251001'
 ```
 
 ```bash
