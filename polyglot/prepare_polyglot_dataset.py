@@ -4,7 +4,6 @@ from pathlib import Path
 import glob
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-import git
 
 from utils.git_utils import diff_versus_commit
 
@@ -177,7 +176,9 @@ def register_git(benchmark_path):
                     raise ValueError(f"No solution files found in config for {practice_dir}")
 
                 # init commit only with solution files
-                subprocess.run(["git", "init"], cwd=practice_dir, check=True)
+                subprocess.run(["git", "init"], cwd=practice_dir, check=True, capture_output=True, text=True)
+                subprocess.run(["git", "config", "user.name", "benchmark-prep"], cwd=practice_dir, check=True)
+                subprocess.run(["git", "config", "user.email", "benchmark-prep@example.com"], cwd=practice_dir, check=True)
                 for solution_file in solution_files:
                     subprocess.run(["git", "add", solution_file], cwd=practice_dir, check=True)
                 # Add .docs folder if it exists
@@ -195,15 +196,21 @@ def register_git(benchmark_path):
                 for adding_file in adding_files:
                     if (practice_dir / adding_file).exists():
                         subprocess.run(["git", "add", adding_file], cwd=practice_dir, check=True)
-                subprocess.run(["git", "status"], cwd=practice_dir, check=True)
-                subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=practice_dir, check=True)
+                subprocess.run(["git", "status"], cwd=practice_dir, check=True, capture_output=True, text=True)
+                subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=practice_dir, check=True, capture_output=True, text=True)
                 # Get initial commit hash
                 result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=practice_dir, check=True, capture_output=True, text=True)
                 solution_commit = result.stdout.strip()
 
                 # Then adding everything else
                 subprocess.run(["git", "add", "."], cwd=practice_dir, check=True)
-                subprocess.run(["git", "commit", "--amend", "-m", "all files"], cwd=practice_dir, check=True)
+                subprocess.run(
+                    ["git", "commit", "--amend", "-m", "all files"],
+                    cwd=practice_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
 
                 all_files_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=practice_dir, check=True, capture_output=True, text=True).stdout.strip()
 
