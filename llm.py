@@ -48,6 +48,8 @@ def _load_shared_env() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     env_paths = [
         repo_root / "configs" / "providers" / ".env.shared",
+        repo_root / "configs" / "providers" / ".env.haiku",
+        repo_root / "configs" / "providers" / ".env.openai",
         repo_root / "configs" / "models" / "shared.env",
     ]
     for env_path in env_paths:
@@ -60,6 +62,13 @@ _load_shared_env()
 
 def is_openai_responses_model(model: str) -> bool:
     return model.startswith(("gpt-5", "gpt-4.1", "o1-", "o3-", "o4-"))
+
+
+def openai_reasoning_config(model: str):
+    effort = (os.getenv("DGM_REASONING_EFFORT") or os.getenv("OPENAI_REASONING_EFFORT") or "").strip()
+    if not effort or not is_openai_responses_model(model):
+        return None
+    return {"effort": effort}
 
 
 def extract_response_text(response) -> str:
@@ -361,10 +370,16 @@ def get_response_from_llm(
                 ],
             }
         ]
+        response_kwargs = {
+            "model": model,
+            "input": new_msg_history,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+        }
+        reasoning = openai_reasoning_config(model)
+        if reasoning:
+            response_kwargs["reasoning"] = reasoning
         response = client.responses.create(
-            model=model,
-            input=new_msg_history,
-            max_output_tokens=MAX_OUTPUT_TOKENS,
+            **response_kwargs,
         )
         log_token_usage(logging, response, model, "get_response_from_llm")
         content = extract_response_text(response)

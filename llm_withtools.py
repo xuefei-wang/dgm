@@ -9,7 +9,13 @@ import openai
 import copy
 from dotenv import load_dotenv
 
-from llm import create_client, get_response_from_llm, is_openai_responses_model, log_token_usage
+from llm import (
+    create_client,
+    get_response_from_llm,
+    is_openai_responses_model,
+    log_token_usage,
+    openai_reasoning_config,
+)
 from prompts.tooluse_prompt import get_tooluse_prompt
 from tools import load_all_tools
 
@@ -18,6 +24,8 @@ def _load_shared_env() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     env_paths = [
         repo_root / "configs" / "providers" / ".env.shared",
+        repo_root / "configs" / "providers" / ".env.haiku",
+        repo_root / "configs" / "providers" / ".env.openai",
         repo_root / "configs" / "models" / "shared.env",
     ]
     for env_path in env_paths:
@@ -73,13 +81,17 @@ def get_response_withtools(
                 tools=tools,
             )
         elif is_openai_responses_model(model):
-            response = client.responses.create(
-                model=model,
-                input=messages,
-                tool_choice=tool_choice,
-                tools=tools,
-                parallel_tool_calls=False
-            )
+            response_kwargs = {
+                "model": model,
+                "input": messages,
+                "tool_choice": tool_choice,
+                "tools": tools,
+                "parallel_tool_calls": False,
+            }
+            reasoning = openai_reasoning_config(model)
+            if reasoning:
+                response_kwargs["reasoning"] = reasoning
+            response = client.responses.create(**response_kwargs)
             response = response
         else:
             raise ValueError(f"Unsupported model: {model}")

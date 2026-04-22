@@ -27,6 +27,8 @@ def _load_shared_env() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     env_paths = [
         repo_root / "configs" / "providers" / ".env.shared",
+        repo_root / "configs" / "providers" / ".env.haiku",
+        repo_root / "configs" / "providers" / ".env.openai",
         repo_root / "configs" / "models" / "shared.env",
     ]
     for env_path in env_paths:
@@ -148,6 +150,8 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             "DGM_CODE_MODEL",
             "DGM_SELF_IMPROVE_MODEL",
             "DGM_DIAGNOSE_MODEL",
+            "DGM_REASONING_EFFORT",
+            "OPENAI_REASONING_EFFORT",
         ])
         safe_log("Running the agent")
         cmd = [
