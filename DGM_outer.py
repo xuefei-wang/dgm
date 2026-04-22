@@ -171,7 +171,10 @@ def choose_selfimproves(output_dir, archive, selfimprove_size, method='random', 
             num_total_ids = len(empty_ids) + len(resolved_ids) + len(unresolved_ids)
 
             # Solve empty patches
-            if len(empty_ids) >= 0.1 * num_total_ids and random.random() < 0.25:
+            if empty_ids and (
+                not unresolved_ids
+                or (len(empty_ids) >= 0.1 * num_total_ids and random.random() < 0.25)
+            ):
                 entry = 'solve_empty_patches'
                 selfimprove_entries.append((parent_commit, entry))
                 continue
@@ -190,7 +193,7 @@ def choose_selfimproves(output_dir, archive, selfimprove_size, method='random', 
                 continue
 
             # Choose a random unresolved entry
-            if unresolved_ids == 0:
+            if not unresolved_ids:
                 continue
             entry_ids = unresolved_ids
         entry = random.choice(entry_ids)

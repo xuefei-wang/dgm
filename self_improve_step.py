@@ -61,6 +61,28 @@ def _load_swebench_pro_dataset(dataset_path):
 _load_shared_env()
 diagnose_model = os.getenv('DGM_DIAGNOSE_MODEL', 'o1-2024-12-17')
 
+
+def _ensure_container_git_repo(container):
+    """Reinitialize copied submodule worktrees with external .git pointers."""
+    cmd = (
+        "/bin/sh -c '"
+        "if ! git -C /dgm rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
+        "rm -rf /dgm/.git && git -C /dgm init; "
+        "fi'"
+    )
+    exec_result = container.exec_run(cmd, workdir='/')
+    log_container_output(exec_result)
+
+
+def _read_container_head_commit(container):
+    exec_result = container.exec_run("git rev-parse HEAD", workdir='/dgm/')
+    log_container_output(exec_result)
+    commit_hash = exec_result.output.decode('utf-8').strip().splitlines()[-1]
+    if not commit_hash:
+        raise RuntimeError("Failed to read DGM container HEAD commit")
+    return commit_hash
+
+
 def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
     client = create_client(diagnose_model)
     if polyglot:
@@ -422,6 +444,7 @@ def self_improve(
         force_rebuild=force_rebuild,
     )
     container.start()
+    _ensure_container_git_repo(container)
 
     if polyglot:
         # remove the swe version of coding_agent.py
@@ -454,9 +477,7 @@ def self_improve(
     log_container_output(exec_result)
     exec_result = container.exec_run("git -c user.name='user' -c user.email='you@example.com' commit -m 'a nonsense commit message'", workdir='/dgm/')
     log_container_output(exec_result)
-    commit_output = exec_result.output.decode('utf-8')
-    # Git commit output format: `[master (root-commit) <hash>] a nonsense commit message`
-    commit_hash = commit_output.split()[1].strip("[]")  # Extract the hash part
+    commit_hash = _read_container_head_commit(container)
 
     # Install requirements again in case of any changes
     exec_result = container.exec_run("python -m pip install -r /dgm/requirements.txt", workdir='/')
