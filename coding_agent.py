@@ -105,7 +105,7 @@ class AgenticSystem:
         """
         Get the regression tests from the repository.
         """
-        instruction = f"""I have uploaded a Python code repository in the directory {self.git_tempdir}.
+        instruction = f"""I have uploaded a software repository in the directory {self.git_tempdir}.
 
 <problem_description>
 {self.problem_statement}
@@ -132,7 +132,7 @@ At the end, please provide a summary that includes where the regression tests ar
         Run the regression tests and get the test report.
         """
         code_diff = self.get_current_edits()
-        instruction = f"""I have uploaded a Python code repository in the directory {self.git_tempdir}. There is an attempt to address the problem statement. Please review the changes and run the regression tests.
+        instruction = f"""I have uploaded a software repository in the directory {self.git_tempdir}. There is an attempt to address the problem statement. Please review the changes and run the regression tests.
 
 <problem_description>
 {self.problem_statement}
@@ -160,7 +160,7 @@ Your task is to run the regression tests in the {self.git_tempdir} directory to 
         """
         The forward function for the AgenticSystem.
         """
-        instruction = f"""I have uploaded a Python code repository in the directory {self.git_tempdir}. Help solve the following problem.
+        instruction = f"""I have uploaded a software repository in the directory {self.git_tempdir}. Help solve the following problem.
 
 <problem_description>
 {self.problem_statement}

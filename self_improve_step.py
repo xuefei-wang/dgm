@@ -48,6 +48,16 @@ def _collect_runtime_env(names):
     return env_vars
 
 
+def _load_swebench_pro_dataset(dataset_path):
+    entries = []
+    with open(dataset_path, encoding="utf-8") as f:
+        for line in f:
+            payload = line.strip()
+            if payload:
+                entries.append(json.loads(payload))
+    return entries
+
+
 _load_shared_env()
 diagnose_model = os.getenv('DGM_DIAGNOSE_MODEL', 'o1-2024-12-17')
 
@@ -251,6 +261,84 @@ def run_harness_polyglot(entry, model_name_or_path, patch_files, num_evals, outp
         metadata['overall_performance_deep'] = overall_performance
         safe_log("End of evaluation more")
 
+
+def run_harness_swebench_pro(
+    entry,
+    model_name_or_path,
+    patch_files,
+    num_evals,
+    output_dir,
+    metadata,
+    run_id,
+    test_more_threshold,
+    test_task_list,
+    test_task_list_more,
+    swebench_pro_dataset_path,
+    swebench_pro_task_map,
+    swebench_pro_eval_source,
+    swebench_pro_scripts_dir,
+    swebench_pro_dockerhub_username,
+    swebench_pro_use_local_docker,
+    swebench_pro_docker_platform,
+    swebench_pro_block_network,
+):
+    from swe_bench.pro_harness import harness as pro_harness
+
+    safe_log('Start SWE-bench Pro harness')
+    test_task_list = [entry] if test_task_list is None else test_task_list
+    dnames = pro_harness(
+        dataset_path=swebench_pro_dataset_path,
+        task_map=swebench_pro_task_map,
+        test_task_list=test_task_list,
+        num_samples=-1,
+        max_workers=min(5, len(test_task_list)),
+        model_name_or_path=model_name_or_path,
+        model_patch_paths=patch_files,
+        num_evals=num_evals,
+        num_evals_parallel=min(5, num_evals),
+        pred_dname=os.path.join(output_dir, "predictions"),
+        output_dir=output_dir,
+        eval_source=swebench_pro_eval_source,
+        scripts_dir=swebench_pro_scripts_dir,
+        dockerhub_username=swebench_pro_dockerhub_username,
+        use_local_docker=swebench_pro_use_local_docker,
+        docker_platform=swebench_pro_docker_platform,
+        block_network=swebench_pro_block_network,
+    )
+    metadata['swe_dnames'] = [str(dn) for dn in dnames]
+    performances, overall_performance = get_all_performance(model_name_or_path, results_dir=output_dir)
+    metadata['overall_performance'] = overall_performance
+    safe_log("End of SWE-bench Pro evaluation")
+
+    if (overall_performance and
+        test_more_threshold is not None and test_task_list_more and
+            overall_performance.get('total_resolved_instances', 0) >= len(test_task_list) * test_more_threshold):
+        safe_log("Start additional SWE-bench Pro evaluation cycle")
+        dnames = pro_harness(
+            dataset_path=swebench_pro_dataset_path,
+            task_map=swebench_pro_task_map,
+            test_task_list=test_task_list_more,
+            num_samples=-1,
+            max_workers=min(5, len(test_task_list_more)),
+            model_name_or_path=model_name_or_path,
+            model_patch_paths=patch_files,
+            num_evals=num_evals,
+            num_evals_parallel=min(5, num_evals),
+            pred_dname=os.path.join(output_dir, "predictions"),
+            output_dir=output_dir,
+            eval_source=swebench_pro_eval_source,
+            scripts_dir=swebench_pro_scripts_dir,
+            dockerhub_username=swebench_pro_dockerhub_username,
+            use_local_docker=swebench_pro_use_local_docker,
+            docker_platform=swebench_pro_docker_platform,
+            block_network=swebench_pro_block_network,
+        )
+        metadata.setdefault('swe_dnames_deep', []).extend(str(dn) for dn in dnames)
+        performances, overall_performance = get_all_performance(model_name_or_path, results_dir=output_dir)
+        metadata['overall_performance_deep'] = overall_performance
+        metadata['overall_performance'] = overall_performance
+        safe_log("End of additional SWE-bench Pro evaluation")
+
 def self_improve(
     parent_commit='initial',  # 'initial' if starting from original dgm, else the run_id
     output_dir='output_selfimprove/',
@@ -265,12 +353,26 @@ def self_improve(
     full_eval_threshold=None,
     # Run baseline
     run_baseline=None,
-    polyglot=False
+    polyglot=False,
+    swebench_pro=False,
+    swebench_pro_dataset_path="../../benchmarks/swebench_pro/dataset/test.jsonl",
+    swebench_pro_task_map="../../benchmarks/swebench_pro/task_maps/swebench_pro_test_50_seed0_v1.json",
+    swebench_pro_eval_source="../../third_party/SWE-bench_Pro-os",
+    swebench_pro_scripts_dir=None,
+    swebench_pro_dockerhub_username="jefzda",
+    swebench_pro_use_local_docker=True,
+    swebench_pro_docker_platform=None,
+    swebench_pro_block_network=False,
 ):
     _load_shared_env()
 
+    if polyglot and swebench_pro:
+        raise ValueError("polyglot and swebench_pro cannot both be enabled")
+
     global dataset
-    if polyglot:
+    if swebench_pro:
+        dataset = _load_swebench_pro_dataset(swebench_pro_dataset_path)
+    elif polyglot:
         dataset_path = os.getenv(
             "DGM_POLYGLOT_METADATA",
             "../../benchmarks/polyglot/source/polyglot_benchmark_metadata.json",
@@ -437,7 +539,28 @@ def self_improve(
     model_name_or_path = run_id
     if model_patch_exists and model_patch_notempty:
         try:
-            if not polyglot:
+            if swebench_pro:
+                run_harness_swebench_pro(
+                    entry,
+                    model_name_or_path,
+                    patch_files,
+                    num_evals,
+                    output_dir,
+                    metadata,
+                    run_id,
+                    test_more_threshold,
+                    test_task_list,
+                    test_task_list_more,
+                    swebench_pro_dataset_path,
+                    swebench_pro_task_map,
+                    swebench_pro_eval_source,
+                    swebench_pro_scripts_dir,
+                    swebench_pro_dockerhub_username,
+                    swebench_pro_use_local_docker,
+                    swebench_pro_docker_platform,
+                    swebench_pro_block_network,
+                )
+            elif not polyglot:
                 run_harness_swe(entry, model_name_or_path, patch_files, num_evals, output_dir, metadata, run_id, test_more_threshold, test_task_list, test_task_list_more)
             else:
                 run_harness_polyglot(entry, model_name_or_path, patch_files, num_evals, output_dir, metadata, run_id, test_more_threshold, test_task_list, test_task_list_more)
