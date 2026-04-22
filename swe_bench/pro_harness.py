@@ -300,24 +300,12 @@ def _build_problem_statement(entry: dict[str, Any]) -> str:
 
 
 def _build_test_description(entry: dict[str, Any]) -> str:
-    selected_files = _parse_string_list(entry.get("selected_test_files_to_run"))
     lines = [
-        "SWE-bench Pro evaluates this repository with the official per-instance Docker image.",
-        "When the official test script is available in this container, run it with:",
-        "`cd /app && bash /workspace/run_script.sh <specific test files>`.",
-        "Use the given command shape exactly; omit <specific test files> to run the full script.",
+        "SWE-bench Pro will evaluate the final patch with the official per-instance Docker image after prediction.",
+        "During prediction, use only public files and tests available in the repository checkout under /app.",
     ]
-    if selected_files:
-        lines.append("Selected test files for this issue:")
-        lines.extend(f"- {path}" for path in selected_files)
     lines.append("Do not solve the issue by modifying tests; make the minimal source change.")
     return "\n".join(lines)
-
-
-def _last_before_repo_set_cmd(entry: dict[str, Any]) -> str:
-    commands = _clean_text(entry.get("before_repo_set_cmd")).splitlines()
-    commands = [command.strip() for command in commands if command.strip()]
-    return commands[-1] if commands else ""
 
 
 def _safe_container_name(instance_id: str, run_id: str) -> str:
@@ -377,11 +365,10 @@ fi
     raise RuntimeError("Could not determine agent Python executable")
 
 
-def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
+def _copy_dgm_runtime(container) -> None:
     from swe_bench.utils import copy_to_container
 
-    instance_dirname = safe_instance_filename(instance_id)
-    container.exec_run("mkdir -p /dgm /workspace", workdir="/")
+    container.exec_run("mkdir -p /dgm", workdir="/")
     for relative in [
         "coding_agent.py",
         "requirements.txt",
@@ -397,14 +384,6 @@ def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
         dest = f"/dgm/{relative}"
         copy_to_container(container, source, dest)
 
-    run_script = scripts_dir / instance_dirname / "run_script.sh"
-    parser_script = scripts_dir / instance_dirname / "parser.py"
-    if run_script.exists():
-        copy_to_container(container, run_script, "/workspace/run_script.sh")
-        container.exec_run("chmod +x /workspace/run_script.sh", workdir="/")
-    if parser_script.exists():
-        copy_to_container(container, parser_script, "/workspace/parser.py")
-
 
 def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
     from swe_bench.utils import log_container_output
@@ -418,10 +397,6 @@ def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
     )
     log_container_output(container.exec_run(["/bin/bash", "-lc", setup], workdir="/"))
 
-    before_cmd = _last_before_repo_set_cmd(entry)
-    if before_cmd:
-        log_container_output(container.exec_run(["/bin/bash", "-lc", before_cmd], workdir="/app"))
-
     commit_cmd = (
         "git -C /app add --all && "
         "git -C /app -c user.name='dgm' -c user.email='dgm@example.com' "
@@ -431,6 +406,18 @@ def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
     result = container.exec_run(["/bin/bash", "-lc", commit_cmd], workdir="/")
     log_container_output(result)
     return result.output.decode("utf-8").strip().splitlines()[-1]
+
+
+def _raise_for_agent_failure(result) -> None:
+    exit_code = getattr(result, "exit_code", 0)
+    if exit_code != 0:
+        output = getattr(result, "output", b"")
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"DGM coding agent failed with exit code {exit_code}: "
+            f"{str(output)[-1000:]}"
+        )
 
 
 def _apply_model_patches(container, model_patch_paths: list[str] | None) -> None:
@@ -503,7 +490,7 @@ def process_entry(
             run_kwargs["platform"] = docker_platform
         container = client.containers.run(image_uri, **run_kwargs)
 
-        _copy_dgm_runtime(container, scripts_dir, instance_id)
+        _copy_dgm_runtime(container)
         agent_base_commit = _prepare_app_repo(container, entry)
         _apply_model_patches(container, model_patch_paths)
 
@@ -531,7 +518,9 @@ def process_entry(
             "--instance_id",
             instance_id,
         ]
-        log_container_output(container.exec_run(cmd, environment=_runtime_env(), workdir="/app"), raise_error=False)
+        agent_result = container.exec_run(cmd, environment=_runtime_env(), workdir="/app")
+        log_container_output(agent_result, raise_error=False)
+        _raise_for_agent_failure(agent_result)
 
         copy_from_container(container, chat_history_file_container, chat_history_file)
         result = container.exec_run(["find", "/dgm/", "-name", f"{instance_filename}_*.md"], workdir="/")
@@ -823,15 +812,16 @@ def build_report(entries: list[dict[str, Any]], results: list[dict[str, Any]], e
         and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
         and validate_instance_id(result["instance_id"]) not in eval_results
     ]
-    unresolved_ids = sorted(
+    unresolved_eval_ids = [
         validate_instance_id(result["instance_id"])
         for result in results
         if result.get("success")
         and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
         and validate_instance_id(result["instance_id"]) in eval_results
         and not eval_results[validate_instance_id(result["instance_id"])]
-    )
+    ]
     error_ids = sorted(set(incomplete_ids) | set(missing_eval_ids))
+    unresolved_ids = sorted(set(unresolved_eval_ids) | set(error_ids))
 
     return {
         "total_instances": len(entries),

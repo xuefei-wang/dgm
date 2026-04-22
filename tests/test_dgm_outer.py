@@ -1,6 +1,9 @@
 import json
+from types import SimpleNamespace
 
-from DGM_outer import choose_selfimproves
+import pytest
+
+from DGM_outer import choose_selfimproves, validate_swebench_pro_paths
 from self_improve_step import _ensure_container_git_repo, _read_container_head_commit
 
 
@@ -24,6 +27,23 @@ def test_choose_selfimproves_handles_all_empty_patch_parent(tmp_path):
     entries = choose_selfimproves(str(tmp_path), ["initial"], 1)
 
     assert entries == [("initial", "solve_empty_patches")]
+
+
+def test_validate_swebench_pro_paths_fails_fast_for_missing_eval_source(tmp_path):
+    dataset = tmp_path / "test.jsonl"
+    task_map = tmp_path / "task_map.json"
+    dataset.write_text("{}", encoding="utf-8")
+    task_map.write_text("{}", encoding="utf-8")
+
+    args = SimpleNamespace(
+        swebench_pro_dataset_path=str(dataset),
+        swebench_pro_task_map=str(task_map),
+        swebench_pro_eval_source=str(tmp_path / "missing-evaluator"),
+        swebench_pro_scripts_dir=None,
+    )
+
+    with pytest.raises(FileNotFoundError, match="evaluator script"):
+        validate_swebench_pro_paths(args)
 
 
 class _FakeExecResult:

@@ -6,7 +6,7 @@ import os
 import random
 import re
 import shutil
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
 from prompts.self_improvement_prompt import find_selfimprove_eval_logs
 from utils.common_utils import load_json_file
@@ -82,6 +82,27 @@ def load_task_ids_file(path):
                     task_ids.append(validate_swebench_pro_task_id(task_id))
             return task_ids
     raise ValueError(f"Unsupported task ID file: {path}")
+
+
+def validate_swebench_pro_paths(args):
+    checks = [
+        (args.swebench_pro_dataset_path, "SWE-bench Pro dataset", os.path.isfile),
+        (args.swebench_pro_task_map, "SWE-bench Pro task map", os.path.isfile),
+        (
+            os.path.join(args.swebench_pro_eval_source, "swe_bench_pro_eval.py"),
+            "SWE-bench Pro evaluator script",
+            os.path.isfile,
+        ),
+        (
+            args.swebench_pro_scripts_dir
+            or os.path.join(args.swebench_pro_eval_source, "run_scripts"),
+            "SWE-bench Pro run_scripts directory",
+            os.path.isdir,
+        ),
+    ]
+    missing = [f"{label}: {path}" for path, label, predicate in checks if not predicate(path)]
+    if missing:
+        raise FileNotFoundError("Invalid SWE-bench Pro configuration:\n" + "\n".join(missing))
 
 def any_exceeding_context_length(output_dir, commit_id, instance_ids):
     """
@@ -412,6 +433,7 @@ def main():
     # SWE issues to consider
     swebench_pro_all_ids = None
     if args.swebench_pro:
+        validate_swebench_pro_paths(args)
         swebench_pro_all_ids = load_task_ids_file(args.swebench_pro_task_map)
         if args.shallow_eval:
             swe_issues_sm = swebench_pro_all_ids
