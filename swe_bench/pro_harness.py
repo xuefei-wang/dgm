@@ -217,6 +217,28 @@ def _container_python(container) -> str:
     raise RuntimeError("Could not find python or python3 in the SWE-bench Pro container")
 
 
+def _setup_agent_python(container, python_bin: str) -> str:
+    from swe_bench.utils import log_container_output
+
+    marker = "__DGM_AGENT_PYTHON__:"
+    setup_cmd = f"""
+set -e
+if {python_bin} -m venv /dgm/.venv; then
+  /dgm/.venv/bin/python -m pip install -r /dgm/requirements.txt
+  echo {marker}/dgm/.venv/bin/python
+else
+  {python_bin} -m pip install --break-system-packages -r /dgm/requirements.txt
+  echo {marker}{python_bin}
+fi
+"""
+    result = container.exec_run(["/bin/bash", "-lc", setup_cmd], workdir="/")
+    log_container_output(result)
+    for line in reversed(result.output.decode("utf-8").splitlines()):
+        if line.startswith(marker):
+            return line.removeprefix(marker).strip()
+    raise RuntimeError("Could not determine agent Python executable")
+
+
 def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
     from swe_bench.utils import copy_to_container
 
@@ -346,14 +368,13 @@ def process_entry(
         _apply_model_patches(container, model_patch_paths)
 
         python_bin = _container_python(container)
-        install_cmd = f"{python_bin} -m pip install -r /dgm/requirements.txt"
-        log_container_output(container.exec_run(["/bin/bash", "-lc", install_cmd], workdir="/"))
+        agent_python = _setup_agent_python(container, python_bin)
 
         chat_history_file_container = f"/dgm/{chat_history_file.name}"
         cmd = [
             "timeout",
             "32400",
-            python_bin,
+            agent_python,
             "/dgm/coding_agent.py",
             "--problem_statement",
             _build_problem_statement(entry),
