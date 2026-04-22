@@ -4,11 +4,24 @@ import json
 import math
 import os
 import random
+import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, TimeoutError
 
 from prompts.self_improvement_prompt import find_selfimprove_eval_logs
 from utils.common_utils import load_json_file
 from utils.evo_utils import load_dgm_metadata, is_compiled_self_improve
+
+SAFE_SWEBENCH_PRO_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def validate_swebench_pro_task_id(task_id):
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError(f"Invalid SWE-bench Pro task ID: {task_id!r}")
+    if task_id in {".", ".."} or not SAFE_SWEBENCH_PRO_ID_RE.fullmatch(task_id):
+        raise ValueError(f"Unsafe SWE-bench Pro task ID: {task_id!r}")
+    return task_id
+
 
 def initialize_run(
     output_dir,
@@ -43,7 +56,9 @@ def initialize_run(
     initial_dest = os.path.join(output_dir, "initial")
     if not prevrun_dir and not os.path.exists(initial_dest):
         if os.path.exists(initial_source):
-            os.system(f"cp -r {initial_source}/ {initial_dest}")
+            if not os.path.isdir(initial_source):
+                raise RuntimeError(f"Initial source must be a directory: {initial_source}")
+            shutil.copytree(initial_source, initial_dest)
         else:
             raise RuntimeError(f"Error: Need to properly configure evaluation results for the initial version: {initial_source}")
 
@@ -53,10 +68,10 @@ def initialize_run(
 def load_task_ids_file(path):
     data = load_json_file(path)
     if isinstance(data, list) and all(isinstance(item, str) for item in data):
-        return data
+        return [validate_swebench_pro_task_id(item) for item in data]
     if isinstance(data, dict):
         if isinstance(data.get("task_ids"), list):
-            return [item for item in data["task_ids"] if isinstance(item, str)]
+            return [validate_swebench_pro_task_id(item) for item in data["task_ids"] if isinstance(item, str)]
         if isinstance(data.get("tasks"), list):
             task_ids = []
             for item in data["tasks"]:
@@ -64,7 +79,7 @@ def load_task_ids_file(path):
                     continue
                 task_id = item.get("task_id") or item.get("instance_id")
                 if isinstance(task_id, str):
-                    task_ids.append(task_id)
+                    task_ids.append(validate_swebench_pro_task_id(task_id))
             return task_ids
     raise ValueError(f"Unsupported task ID file: {path}")
 

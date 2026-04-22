@@ -13,7 +13,7 @@ DGM_ROOT = Path(__file__).resolve().parents[1]
 if str(DGM_ROOT) not in sys.path:
     sys.path.insert(0, str(DGM_ROOT))
 
-from swe_bench.pro_harness import DEFAULT_TASK_MAP, load_task_ids
+from swe_bench.pro_harness import DEFAULT_TASK_MAP, load_task_ids, safe_instance_filename
 
 
 def _load_json(path: Path):
@@ -57,6 +57,33 @@ def build_metadata(report: dict, task_ids: list[str], packaged_report: Path) -> 
     }
 
 
+def validate_predictions_dir(predictions_dir: Path, task_ids: list[str]) -> None:
+    if not predictions_dir.is_dir():
+        raise FileNotFoundError(f"Predictions directory does not exist: {predictions_dir}")
+
+    run_dirs = sorted(path for path in predictions_dir.iterdir() if path.is_dir())
+    if not run_dirs:
+        raise FileNotFoundError(f"No prediction run directories found under {predictions_dir}")
+
+    missing = []
+    for task_id in task_ids:
+        filename = safe_instance_filename(task_id)
+        found_complete_run = any(
+            (run_dir / f"{filename}.json").is_file()
+            and (run_dir / f"{filename}.md").is_file()
+            and (run_dir / f"{filename}_eval.md").is_file()
+            for run_dir in run_dirs
+        )
+        if not found_complete_run:
+            missing.append(task_id)
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing prediction JSON, agent log, or eval log for SWE-bench Pro tasks: "
+            f"{missing[:10]}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True, help="SWE-bench Pro harness report JSON.")
@@ -65,7 +92,8 @@ def main() -> None:
     parser.add_argument(
         "--predictions-dir",
         type=Path,
-        help="Optional harness predictions directory to package for DGM diagnosis.",
+        required=True,
+        help="Harness predictions directory to package for DGM diagnosis.",
     )
     args = parser.parse_args()
 
@@ -73,13 +101,13 @@ def main() -> None:
     task_ids = load_task_ids(args.task_map.resolve())
     if task_ids is None:
         raise ValueError(f"No task IDs loaded from {args.task_map}")
+    validate_predictions_dir(args.predictions_dir.resolve(), task_ids)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     packaged_report = args.output_dir / args.report.name
     shutil.copy2(args.report.resolve(), packaged_report)
-    if args.predictions_dir:
-        packaged_predictions = args.output_dir / "predictions"
-        shutil.copytree(args.predictions_dir.resolve(), packaged_predictions, dirs_exist_ok=True)
+    packaged_predictions = args.output_dir / "predictions"
+    shutil.copytree(args.predictions_dir.resolve(), packaged_predictions, dirs_exist_ok=True)
 
     metadata = build_metadata(report, task_ids, packaged_report)
     output_path = args.output_dir / "metadata.json"

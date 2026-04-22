@@ -8,7 +8,9 @@ import ast
 import datetime
 import json
 import os
+import posixpath
 import re
+import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +32,19 @@ DEFAULT_TASK_MAP = REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "sw
 DEFAULT_EVAL_SOURCE = REPO_ROOT / "third_party" / "SWE-bench_Pro-os"
 DEFAULT_SCRIPTS_DIR = DEFAULT_EVAL_SOURCE / "run_scripts"
 DEFAULT_DOCKERHUB_USERNAME = "jefzda"
+SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def validate_instance_id(instance_id: Any) -> str:
+    if not isinstance(instance_id, str) or not instance_id:
+        raise ValueError(f"Invalid SWE-bench Pro instance ID: {instance_id!r}")
+    if instance_id in {".", ".."} or not SAFE_INSTANCE_ID_RE.fullmatch(instance_id):
+        raise ValueError(f"Unsafe SWE-bench Pro instance ID: {instance_id!r}")
+    return instance_id
+
+
+def safe_instance_filename(instance_id: Any) -> str:
+    return validate_instance_id(instance_id)
 
 
 def _load_shared_env() -> None:
@@ -95,10 +110,10 @@ def load_task_ids(path: Path | str | None) -> list[str] | None:
     path = Path(path)
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, list) and all(isinstance(item, str) for item in data):
-        return data
+        return [validate_instance_id(item) for item in data]
     if isinstance(data, dict):
         if isinstance(data.get("task_ids"), list):
-            return [str(item) for item in data["task_ids"] if isinstance(item, str)]
+            return [validate_instance_id(item) for item in data["task_ids"] if isinstance(item, str)]
         if isinstance(data.get("tasks"), list):
             ids = []
             for item in data["tasks"]:
@@ -106,19 +121,20 @@ def load_task_ids(path: Path | str | None) -> list[str] | None:
                     continue
                 task_id = item.get("task_id") or item.get("instance_id")
                 if isinstance(task_id, str):
-                    ids.append(task_id)
+                    ids.append(validate_instance_id(task_id))
             return ids
     raise ValueError(f"Unsupported task map format: {path}")
 
 
 def _select_entries(entries: list[dict[str, Any]], task_ids: list[str] | None) -> list[dict[str, Any]]:
     if task_ids is None:
-        return list(entries)
-    by_id = {str(entry.get("instance_id")): entry for entry in entries}
+        return [{**entry, "instance_id": validate_instance_id(entry.get("instance_id"))} for entry in entries]
+    task_ids = [validate_instance_id(task_id) for task_id in task_ids]
+    by_id = {validate_instance_id(entry.get("instance_id")): entry for entry in entries}
     missing = [task_id for task_id in task_ids if task_id not in by_id]
     if missing:
         raise ValueError(f"{len(missing)} task IDs missing from dataset: {missing[:10]}")
-    return [by_id[task_id] for task_id in task_ids]
+    return [{**by_id[task_id], "instance_id": task_id} for task_id in task_ids]
 
 
 def _clean_text(value: Any) -> str:
@@ -149,6 +165,102 @@ def _parse_string_list(value: Any) -> list[str]:
         if isinstance(parsed, (list, tuple, set)):
             return [str(item).strip() for item in parsed if str(item).strip()]
     return []
+
+
+def _normalize_repo_path(path: str) -> str:
+    path = path.strip()
+    if not path or path == "/dev/null":
+        return ""
+    if path.startswith("a/") or path.startswith("b/"):
+        path = path[2:]
+    while path.startswith("./"):
+        path = path[2:]
+    path = path.lstrip("/")
+    normalized = posixpath.normpath(path)
+    if normalized in {".", ".."} or normalized.startswith("../"):
+        return ""
+    return normalized
+
+
+def _private_test_path_candidates(value: str) -> list[str]:
+    candidates = []
+    text = value.strip()
+    if not text:
+        return candidates
+    candidates.append(text)
+    if " | " in text:
+        candidates.append(text.split(" | ", 1)[0])
+    if "::" in text:
+        candidates.append(text.split("::", 1)[0])
+    return candidates
+
+
+def _private_test_paths(entry: dict[str, Any]) -> set[str]:
+    paths = set()
+    for field in [
+        "selected_test_files_to_run",
+        "fail_to_pass",
+        "FAIL_TO_PASS",
+        "pass_to_pass",
+        "PASS_TO_PASS",
+    ]:
+        for value in _parse_string_list(entry.get(field)):
+            for candidate in _private_test_path_candidates(value):
+                normalized = _normalize_repo_path(candidate)
+                if normalized:
+                    paths.add(normalized)
+    return paths
+
+
+def _diff_header_path(value: str) -> str:
+    value = value.strip()
+    if "\t" in value:
+        value = value.split("\t", 1)[0]
+    return _normalize_repo_path(value)
+
+
+def _diff_block_paths(block: list[str]) -> set[str]:
+    paths = set()
+    for line in block:
+        if line.startswith("diff --git "):
+            try:
+                parts = shlex.split(line.strip())
+            except ValueError:
+                parts = line.strip().split()
+            if len(parts) >= 4:
+                for value in parts[2:4]:
+                    normalized = _normalize_repo_path(value)
+                    if normalized:
+                        paths.add(normalized)
+        elif line.startswith("--- ") or line.startswith("+++ "):
+            normalized = _diff_header_path(line[4:])
+            if normalized:
+                paths.add(normalized)
+    return paths
+
+
+def filter_private_test_patch_hunks(patch: str, entry: dict[str, Any]) -> str:
+    private_paths = _private_test_paths(entry)
+    if not private_paths or not patch.strip():
+        return patch
+
+    blocks = []
+    current: list[str] = []
+    for line in patch.splitlines(keepends=True):
+        if line.startswith("diff --git ") and current:
+            blocks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append(current)
+
+    filtered_blocks = []
+    for block in blocks:
+        if _diff_block_paths(block) & private_paths:
+            continue
+        filtered_blocks.extend(block)
+    return "".join(filtered_blocks)
 
 
 def _build_problem_statement(entry: dict[str, Any]) -> str:
@@ -184,12 +296,13 @@ def _last_before_repo_set_cmd(entry: dict[str, Any]) -> str:
 
 
 def _safe_container_name(instance_id: str, run_id: str) -> str:
+    instance_id = validate_instance_id(instance_id)
     value = re.sub(r"[^a-zA-Z0-9_.-]", "-", f"dgm-pro-{instance_id}-{run_id}")
     return value[:120].strip("-.") or f"dgm-pro-{run_id}"
 
 
 def _dockerhub_image_uri(entry: dict[str, Any], dockerhub_username: str) -> str:
-    uid = str(entry["instance_id"])
+    uid = validate_instance_id(entry["instance_id"])
     repo_name = str(entry.get("repo") or "")
     repo_base, repo_name_only = repo_name.lower().split("/")
     hsh = uid.replace("instance_", "")
@@ -242,6 +355,7 @@ fi
 def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
     from swe_bench.utils import copy_to_container
 
+    instance_dirname = safe_instance_filename(instance_id)
     container.exec_run("mkdir -p /dgm /workspace", workdir="/")
     for relative in [
         "coding_agent.py",
@@ -258,8 +372,8 @@ def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
         dest = f"/dgm/{relative}"
         copy_to_container(container, source, dest)
 
-    run_script = scripts_dir / instance_id / "run_script.sh"
-    parser_script = scripts_dir / instance_id / "parser.py"
+    run_script = scripts_dir / instance_dirname / "run_script.sh"
+    parser_script = scripts_dir / instance_dirname / "parser.py"
     if run_script.exists():
         copy_to_container(container, run_script, "/workspace/run_script.sh")
         container.exec_run("chmod +x /workspace/run_script.sh", workdir="/")
@@ -316,9 +430,10 @@ def process_entry(
     dockerhub_username: str,
     docker_platform: str | None = None,
 ) -> dict[str, Any]:
-    instance_id = str(entry["instance_id"])
-    chat_history_file = out_dname / f"{instance_id}.md"
-    out_fname = out_dname / f"{instance_id}.json"
+    instance_id = validate_instance_id(entry["instance_id"])
+    instance_filename = safe_instance_filename(instance_id)
+    chat_history_file = out_dname / f"{instance_filename}.md"
+    out_fname = out_dname / f"{instance_filename}.json"
 
     if out_fname.exists():
         with out_fname.open(encoding="utf-8") as handle:
@@ -341,7 +456,7 @@ def process_entry(
 
         client = docker.from_env()
         run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        setup_logger(str(out_dname / f"{instance_id}_docker.log"))
+        setup_logger(str(out_dname / f"{instance_filename}_docker.log"))
         image_uri = _dockerhub_image_uri(entry, dockerhub_username)
         try:
             if docker_platform:
@@ -394,7 +509,7 @@ def process_entry(
         log_container_output(container.exec_run(cmd, environment=_runtime_env(), workdir="/app"), raise_error=False)
 
         copy_from_container(container, chat_history_file_container, chat_history_file)
-        result = container.exec_run(f"find /dgm/ -name '{instance_id}_*.md'", workdir="/")
+        result = container.exec_run(["find", "/dgm/", "-name", f"{instance_filename}_*.md"], workdir="/")
         for history_path in result.output.decode("utf-8").split():
             copy_from_container(container, history_path, out_dname / Path(history_path).name)
 
@@ -450,15 +565,25 @@ def process_entry(
                 print(f"Error cleaning up Docker container for {instance_id}: {exc}")
 
 
-def _write_patch_bundle(path: Path, results: list[dict[str, Any]], prefix: str) -> list[dict[str, str]]:
+def _write_patch_bundle(
+    path: Path,
+    results: list[dict[str, Any]],
+    prefix: str,
+    entries_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
     payload = []
     for result in results:
         patch = str(result.get("model_patch") or "")
         if not result.get("success") or not patch.strip():
             continue
+        instance_id = validate_instance_id(result["instance_id"])
+        patch = filter_private_test_patch_hunks(patch, entries_by_id[instance_id])
+        result["eval_patch"] = patch
+        if not patch.strip():
+            continue
         payload.append(
             {
-                "instance_id": str(result["instance_id"]),
+                "instance_id": instance_id,
                 "patch": patch,
                 "prefix": prefix,
             }
@@ -542,7 +667,7 @@ def _load_eval_results(official_eval_dir: Path) -> dict[str, bool]:
     data = json.loads(eval_results_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         return {}
-    return {str(key): bool(value) for key, value in data.items()}
+    return {validate_instance_id(key): bool(value) for key, value in data.items()}
 
 
 def _build_tests_status(output: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
@@ -607,18 +732,19 @@ def _write_eval_logs(
     eval_results: dict[str, bool],
 ) -> None:
     for result in results:
-        instance_id = str(result["instance_id"])
+        instance_id = validate_instance_id(result["instance_id"])
+        instance_filename = safe_instance_filename(instance_id)
         json_path = Path(str(result["json_path"]))
         if not result.get("success"):
             _update_prediction(json_path, eval_result="error")
-            (out_dname / f"{instance_id}_eval.md").write_text(
+            (out_dname / f"{instance_filename}_eval.md").write_text(
                 f"Evaluation did not run because prediction generation failed.\n\n{result.get('error', '')}",
                 encoding="utf-8",
             )
             continue
-        if not str(result.get("model_patch") or "").strip():
+        if not str(result.get("eval_patch", result.get("model_patch")) or "").strip():
             _update_prediction(json_path, eval_result="empty_patch")
-            (out_dname / f"{instance_id}_eval.md").write_text(
+            (out_dname / f"{instance_filename}_eval.md").write_text(
                 "Evaluation did not run because the model patch was empty.",
                 encoding="utf-8",
             )
@@ -635,28 +761,29 @@ def _write_eval_logs(
             if isinstance(loaded, dict):
                 output = loaded
         tests_status = _build_tests_status(output, entries_by_id[instance_id])
-        (out_dname / f"{instance_id}_eval.md").write_text(
+        (out_dname / f"{instance_filename}_eval.md").write_text(
             _eval_log_text(resolved, tests_status),
             encoding="utf-8",
         )
 
 
 def build_report(entries: list[dict[str, Any]], results: list[dict[str, Any]], eval_results: dict[str, bool]) -> dict[str, Any]:
-    submitted_ids = [str(result["instance_id"]) for result in results]
-    completed_ids = [str(result["instance_id"]) for result in results if result.get("success")]
-    incomplete_ids = [str(result["instance_id"]) for result in results if not result.get("success")]
+    submitted_ids = [validate_instance_id(result["instance_id"]) for result in results]
+    completed_ids = [validate_instance_id(result["instance_id"]) for result in results if result.get("success")]
+    incomplete_ids = [validate_instance_id(result["instance_id"]) for result in results if not result.get("success")]
     empty_patch_ids = [
-        str(result["instance_id"])
+        validate_instance_id(result["instance_id"])
         for result in results
-        if result.get("success") and not str(result.get("model_patch") or "").strip()
+        if result.get("success") and not str(result.get("eval_patch", result.get("model_patch")) or "").strip()
     ]
+    eval_results = {validate_instance_id(instance_id): resolved for instance_id, resolved in eval_results.items()}
     resolved_ids = sorted(instance_id for instance_id, resolved in eval_results.items() if resolved)
     unresolved_ids = sorted(
-        str(result["instance_id"])
+        validate_instance_id(result["instance_id"])
         for result in results
         if result.get("success")
-        and str(result.get("model_patch") or "").strip()
-        and not eval_results.get(str(result["instance_id"]), False)
+        and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
+        and not eval_results.get(validate_instance_id(result["instance_id"]), False)
     )
     error_ids = sorted(set(incomplete_ids))
 
@@ -724,7 +851,7 @@ def harness(
         model_name_or_path = f"{timestamp}--dgm"
 
     out_dnames = []
-    entries_by_id = {str(entry["instance_id"]): entry for entry in entries}
+    entries_by_id = {validate_instance_id(entry["instance_id"]): entry for entry in entries}
     for eval_idx in range(num_evals):
         model_name_or_path_inst = f"{model_name_or_path}_{eval_idx}"
         out_dname = pred_dname / model_name_or_path_inst
@@ -755,7 +882,7 @@ def harness(
                     print(f"Failed {result['instance_id']} for eval {eval_idx}: {result.get('error', 'unknown')}")
 
         patch_bundle = out_dname / "swebench_pro_patches.json"
-        patch_payload = _write_patch_bundle(patch_bundle, results, model_name_or_path_inst)
+        patch_payload = _write_patch_bundle(patch_bundle, results, model_name_or_path_inst, entries_by_id)
         official_eval_dir = output_dir / "official_eval" / model_name_or_path_inst
         eval_results: dict[str, bool] = {}
         if patch_payload:

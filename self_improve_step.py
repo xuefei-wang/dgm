@@ -273,6 +273,7 @@ def run_harness_swebench_pro(
     test_more_threshold,
     test_task_list,
     test_task_list_more,
+    full_eval_threshold,
     swebench_pro_dataset_path,
     swebench_pro_task_map,
     swebench_pro_eval_source,
@@ -282,45 +283,17 @@ def run_harness_swebench_pro(
     swebench_pro_docker_platform,
     swebench_pro_block_network,
 ):
-    from swe_bench.pro_harness import harness as pro_harness
+    from swe_bench.pro_harness import harness as pro_harness, load_task_ids
 
-    safe_log('Start SWE-bench Pro harness')
-    test_task_list = [entry] if test_task_list is None else test_task_list
-    dnames = pro_harness(
-        dataset_path=swebench_pro_dataset_path,
-        task_map=swebench_pro_task_map,
-        test_task_list=test_task_list,
-        num_samples=-1,
-        max_workers=min(5, len(test_task_list)),
-        model_name_or_path=model_name_or_path,
-        model_patch_paths=patch_files,
-        num_evals=num_evals,
-        num_evals_parallel=min(5, num_evals),
-        pred_dname=os.path.join(output_dir, "predictions"),
-        output_dir=output_dir,
-        eval_source=swebench_pro_eval_source,
-        scripts_dir=swebench_pro_scripts_dir,
-        dockerhub_username=swebench_pro_dockerhub_username,
-        use_local_docker=swebench_pro_use_local_docker,
-        docker_platform=swebench_pro_docker_platform,
-        block_network=swebench_pro_block_network,
-    )
-    metadata['swe_dnames'] = [str(dn) for dn in dnames]
-    performances, overall_performance = get_all_performance(model_name_or_path, results_dir=output_dir)
-    metadata['overall_performance'] = overall_performance
-    safe_log("End of SWE-bench Pro evaluation")
-
-    if (overall_performance and
-        test_more_threshold is not None and test_task_list_more and
-            overall_performance.get('total_resolved_instances', 0) >= len(test_task_list) * test_more_threshold):
-        safe_log("Start additional SWE-bench Pro evaluation cycle")
-        dnames = pro_harness(
+    def evaluate_phase(phase, phase_task_list):
+        phase_model_name = f"{model_name_or_path}_{phase}"
+        phase_dnames = pro_harness(
             dataset_path=swebench_pro_dataset_path,
             task_map=swebench_pro_task_map,
-            test_task_list=test_task_list_more,
+            test_task_list=phase_task_list,
             num_samples=-1,
-            max_workers=min(5, len(test_task_list_more)),
-            model_name_or_path=model_name_or_path,
+            max_workers=min(5, len(phase_task_list)),
+            model_name_or_path=phase_model_name,
             model_patch_paths=patch_files,
             num_evals=num_evals,
             num_evals_parallel=min(5, num_evals),
@@ -333,11 +306,50 @@ def run_harness_swebench_pro(
             docker_platform=swebench_pro_docker_platform,
             block_network=swebench_pro_block_network,
         )
-        metadata.setdefault('swe_dnames_deep', []).extend(str(dn) for dn in dnames)
         performances, overall_performance = get_all_performance(model_name_or_path, results_dir=output_dir)
+        return phase_dnames, performances, overall_performance
+
+    def submitted_ids(performances):
+        ids = set()
+        for performance in performances or []:
+            ids.update(str(instance_id) for instance_id in performance.get('submitted_ids', []))
+        return ids
+
+    safe_log('Start SWE-bench Pro harness')
+    test_task_list = [entry] if test_task_list is None else test_task_list
+    first_phase = 'stage1' if test_more_threshold is not None and test_task_list_more else 'shallow'
+    dnames, performances, overall_performance = evaluate_phase(first_phase, test_task_list)
+    metadata['swe_dnames'] = [str(dn) for dn in dnames]
+    metadata['overall_performance'] = overall_performance
+    safe_log("End of SWE-bench Pro evaluation")
+
+    if (overall_performance and
+        test_more_threshold is not None and test_task_list_more and
+            overall_performance.get('total_resolved_instances', 0) >= len(test_task_list) * test_more_threshold):
+        safe_log("Start additional SWE-bench Pro evaluation cycle")
+        dnames, performances, overall_performance = evaluate_phase('stage2', test_task_list_more)
+        metadata.setdefault('swe_dnames_deep', []).extend(str(dn) for dn in dnames)
         metadata['overall_performance_deep'] = overall_performance
         metadata['overall_performance'] = overall_performance
         safe_log("End of additional SWE-bench Pro evaluation")
+
+    if (overall_performance and full_eval_threshold is not None and
+            overall_performance.get('accuracy_score', 0) >= full_eval_threshold):
+        full_task_list = load_task_ids(swebench_pro_task_map)
+        if full_task_list:
+            remaining_task_list = [
+                task_id for task_id in full_task_list
+                if task_id not in submitted_ids(performances)
+            ]
+            if remaining_task_list:
+                safe_log("Start full SWE-bench Pro evaluation cycle")
+                dnames, performances, overall_performance = evaluate_phase('full', remaining_task_list)
+                metadata.setdefault('swe_dnames_full', []).extend(str(dn) for dn in dnames)
+                metadata['overall_performance_full'] = overall_performance
+                metadata['overall_performance'] = overall_performance
+                safe_log("End of full SWE-bench Pro evaluation")
+            else:
+                safe_log("Skipping full SWE-bench Pro evaluation; all task-map instances are already evaluated")
 
 def self_improve(
     parent_commit='initial',  # 'initial' if starting from original dgm, else the run_id
@@ -551,6 +563,7 @@ def self_improve(
                     test_more_threshold,
                     test_task_list,
                     test_task_list_more,
+                    full_eval_threshold,
                     swebench_pro_dataset_path,
                     swebench_pro_task_map,
                     swebench_pro_eval_source,
