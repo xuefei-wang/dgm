@@ -1,27 +1,13 @@
 import argparse
 import datetime
 import json
+import logging
 import os
 from pathlib import Path
-import docker
 from dotenv import load_dotenv
 
-from llm import create_client, get_response_from_llm, extract_json_between_markers
-from prompts.self_improvement_prompt import get_diagnose_prompt_polyglot, get_diagnose_prompt_swe, get_problem_description_prompt
-from prompts.diagnose_improvement_prompt import get_diagnose_improvement_prompt
-from prompts.testrepo_prompt import get_test_description
 from utils.common_utils import load_json_file
 from utils.evo_utils import get_model_patch_paths, get_all_performance, is_compiled_self_improve
-from utils.docker_utils import (
-    build_dgm_container,
-    cleanup_container,
-    copy_from_container,
-    copy_to_container,
-    log_container_output,
-    remove_existing_container,
-    setup_logger,
-    safe_log,
-)
 
 dataset = None
 
@@ -48,12 +34,92 @@ def _collect_runtime_env(names):
     return env_vars
 
 
+def _load_swebench_pro_dataset(dataset_path):
+    entries = []
+    with open(dataset_path, encoding="utf-8") as f:
+        for line in f:
+            payload = line.strip()
+            if payload:
+                entries.append(json.loads(payload))
+    return entries
+
+
+def setup_logger(log_file):
+    from utils.docker_utils import setup_logger as docker_setup_logger
+
+    return docker_setup_logger(log_file)
+
+
+def safe_log(message: str, level: int = logging.INFO):
+    try:
+        from utils.docker_utils import safe_log as docker_safe_log
+    except ModuleNotFoundError as exc:
+        if exc.name != "docker":
+            raise
+        print(message)
+        return
+
+    docker_safe_log(message, level)
+
+
+def log_container_output(exec_result):
+    """
+    Log output from a Docker container execution, handling both streaming and non-streaming cases.
+    """
+    if isinstance(exec_result.output, bytes):
+        safe_log(f"Container output: {exec_result.output.decode()}")
+    else:
+        for chunk in exec_result.output:
+            if chunk:
+                safe_log(f"Container output: {chunk.decode().strip()}")
+
+    if exec_result.exit_code and exec_result.exit_code != 0:
+        error_msg = f"Script failed with exit code {exec_result.exit_code}"
+        safe_log(error_msg, logging.ERROR)
+        raise Exception(error_msg)
+
+
 _load_shared_env()
 diagnose_model = os.getenv('DGM_DIAGNOSE_MODEL', os.getenv('DGM_OPENAI_MODEL', 'gpt-5.4-mini'))
 
-def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
+
+def _ensure_container_git_repo(container):
+    """Reinitialize copied submodule worktrees with external .git pointers."""
+    cmd = (
+        "/bin/sh -c '"
+        "if ! git -C /dgm rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
+        "rm -rf /dgm/.git && git -C /dgm init; "
+        "fi'"
+    )
+    exec_result = container.exec_run(cmd, workdir='/')
+    log_container_output(exec_result)
+
+
+def _read_container_head_commit(container):
+    exec_result = container.exec_run("git rev-parse HEAD", workdir='/dgm/')
+    log_container_output(exec_result)
+    commit_hash = exec_result.output.decode('utf-8').strip().splitlines()[-1]
+    if not commit_hash:
+        raise RuntimeError("Failed to read DGM container HEAD commit")
+    return commit_hash
+
+
+def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False, swebench_pro=False):
+    from llm import create_client, get_response_from_llm, extract_json_between_markers
+    from prompts.self_improvement_prompt import (
+        get_diagnose_prompt_polyglot,
+        get_diagnose_prompt_swe,
+        get_diagnose_prompt_swebench_pro,
+        get_problem_description_prompt,
+    )
+
     client = create_client(diagnose_model)
-    if polyglot:
+    if swebench_pro:
+        diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_swebench_pro(
+            entry, commit, root_dir, out_dir, dataset,
+            patch_files=patch_files,
+        )
+    elif polyglot:
         diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_polyglot(
             entry, commit, root_dir, out_dir, dataset,
             patch_files=patch_files,
@@ -86,6 +152,7 @@ def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attem
                 patch_files=patch_files,
                 max_attempts=max_attempts-1,
                 polyglot=polyglot,
+                swebench_pro=swebench_pro,
             )
         else:
             return None
@@ -111,6 +178,9 @@ def diagnose_improvement(
     Returns:
         dict: The improvement diagnosis.
     """
+    from llm import create_client, get_response_from_llm, extract_json_between_markers
+    from prompts.diagnose_improvement_prompt import get_diagnose_improvement_prompt
+
     client = create_client(diagnose_model)
     diagnose_sys_message, diagnose_prompt = get_diagnose_improvement_prompt(
         entry, parent_commit, root_dir, model_patch_file, out_dir, run_id, dataset,
@@ -251,6 +321,96 @@ def run_harness_polyglot(entry, model_name_or_path, patch_files, num_evals, outp
         metadata['overall_performance_deep'] = overall_performance
         safe_log("End of evaluation more")
 
+
+def run_harness_swebench_pro(
+    entry,
+    model_name_or_path,
+    patch_files,
+    num_evals,
+    output_dir,
+    metadata,
+    run_id,
+    test_more_threshold,
+    test_task_list,
+    test_task_list_more,
+    full_eval_threshold,
+    swebench_pro_dataset_path,
+    swebench_pro_task_map,
+    swebench_pro_eval_source,
+    swebench_pro_scripts_dir,
+    swebench_pro_dockerhub_username,
+    swebench_pro_use_local_docker,
+    swebench_pro_docker_platform,
+    swebench_pro_block_network,
+):
+    from swe_bench.pro_harness import harness as pro_harness, load_task_ids
+
+    def evaluate_phase(phase, phase_task_list):
+        phase_model_name = f"{model_name_or_path}_{phase}"
+        phase_dnames = pro_harness(
+            dataset_path=swebench_pro_dataset_path,
+            task_map=swebench_pro_task_map,
+            test_task_list=phase_task_list,
+            num_samples=-1,
+            max_workers=min(5, len(phase_task_list)),
+            model_name_or_path=phase_model_name,
+            model_patch_paths=patch_files,
+            num_evals=num_evals,
+            num_evals_parallel=min(5, num_evals),
+            pred_dname=os.path.join(output_dir, "predictions"),
+            output_dir=output_dir,
+            eval_source=swebench_pro_eval_source,
+            scripts_dir=swebench_pro_scripts_dir,
+            dockerhub_username=swebench_pro_dockerhub_username,
+            use_local_docker=swebench_pro_use_local_docker,
+            docker_platform=swebench_pro_docker_platform,
+            block_network=swebench_pro_block_network,
+        )
+        performances, overall_performance = get_all_performance(model_name_or_path, results_dir=output_dir)
+        return phase_dnames, performances, overall_performance
+
+    def submitted_ids(performances):
+        ids = set()
+        for performance in performances or []:
+            ids.update(str(instance_id) for instance_id in performance.get('submitted_ids', []))
+        return ids
+
+    safe_log('Start SWE-bench Pro harness')
+    test_task_list = [entry] if test_task_list is None else test_task_list
+    first_phase = 'stage1' if test_more_threshold is not None and test_task_list_more else 'shallow'
+    dnames, performances, overall_performance = evaluate_phase(first_phase, test_task_list)
+    metadata['swe_dnames'] = [str(dn) for dn in dnames]
+    metadata['overall_performance'] = overall_performance
+    safe_log("End of SWE-bench Pro evaluation")
+
+    if (overall_performance and
+        test_more_threshold is not None and test_task_list_more and
+            overall_performance.get('accuracy_score', 0) >= test_more_threshold):
+        safe_log("Start additional SWE-bench Pro evaluation cycle")
+        dnames, performances, overall_performance = evaluate_phase('stage2', test_task_list_more)
+        metadata.setdefault('swe_dnames_deep', []).extend(str(dn) for dn in dnames)
+        metadata['overall_performance_deep'] = overall_performance
+        metadata['overall_performance'] = overall_performance
+        safe_log("End of additional SWE-bench Pro evaluation")
+
+    if (overall_performance and full_eval_threshold is not None and
+            overall_performance.get('accuracy_score', 0) >= full_eval_threshold):
+        full_task_list = load_task_ids(swebench_pro_task_map)
+        if full_task_list:
+            remaining_task_list = [
+                task_id for task_id in full_task_list
+                if task_id not in submitted_ids(performances)
+            ]
+            if remaining_task_list:
+                safe_log("Start full SWE-bench Pro evaluation cycle")
+                dnames, performances, overall_performance = evaluate_phase('full', remaining_task_list)
+                metadata.setdefault('swe_dnames_full', []).extend(str(dn) for dn in dnames)
+                metadata['overall_performance_full'] = overall_performance
+                metadata['overall_performance'] = overall_performance
+                safe_log("End of full SWE-bench Pro evaluation")
+            else:
+                safe_log("Skipping full SWE-bench Pro evaluation; all task-map instances are already evaluated")
+
 def self_improve(
     parent_commit='initial',  # 'initial' if starting from original dgm, else the run_id
     output_dir='output_selfimprove/',
@@ -265,12 +425,26 @@ def self_improve(
     full_eval_threshold=None,
     # Run baseline
     run_baseline=None,
-    polyglot=False
+    polyglot=False,
+    swebench_pro=False,
+    swebench_pro_dataset_path="../../benchmarks/swebench_pro/dataset/test.jsonl",
+    swebench_pro_task_map="../../benchmarks/swebench_pro/task_maps/swebench_pro_test_50_seed0_v1.json",
+    swebench_pro_eval_source="../../third_party/SWE-bench_Pro-os",
+    swebench_pro_scripts_dir=None,
+    swebench_pro_dockerhub_username="jefzda",
+    swebench_pro_use_local_docker=True,
+    swebench_pro_docker_platform=None,
+    swebench_pro_block_network=False,
 ):
     _load_shared_env()
 
+    if polyglot and swebench_pro:
+        raise ValueError("polyglot and swebench_pro cannot both be enabled")
+
     global dataset
-    if polyglot:
+    if swebench_pro:
+        dataset = _load_swebench_pro_dataset(swebench_pro_dataset_path)
+    elif polyglot:
         dataset_path = os.getenv(
             "DGM_POLYGLOT_METADATA",
             "../../benchmarks/polyglot/source/polyglot_benchmark_metadata.json",
@@ -297,6 +471,15 @@ def self_improve(
     logger = setup_logger(os.path.join(output_dir, "self_improve.log"))
 
     # Create and start the Docker container
+    import docker
+    from utils.docker_utils import (
+        build_dgm_container,
+        cleanup_container,
+        copy_from_container,
+        copy_to_container,
+        remove_existing_container,
+    )
+
     image_name = "dgm"
     container_name = f"dgm-container-{run_id}"
     client = docker.from_env()
@@ -308,6 +491,7 @@ def self_improve(
         force_rebuild=force_rebuild,
     )
     container.start()
+    _ensure_container_git_repo(container)
 
     if polyglot:
         # remove the swe version of coding_agent.py
@@ -340,9 +524,7 @@ def self_improve(
     log_container_output(exec_result)
     exec_result = container.exec_run("git -c user.name='user' -c user.email='you@example.com' commit -m 'a nonsense commit message'", workdir='/dgm/')
     log_container_output(exec_result)
-    commit_output = exec_result.output.decode('utf-8')
-    # Git commit output format: `[master (root-commit) <hash>] a nonsense commit message`
-    commit_hash = commit_output.split()[1].strip("[]")  # Extract the hash part
+    commit_hash = _read_container_head_commit(container)
 
     # Install requirements again in case of any changes
     exec_result = container.exec_run("python -m pip install -r /dgm/requirements.txt", workdir='/')
@@ -351,7 +533,15 @@ def self_improve(
     # Get tasks to improve
     if entry:
         safe_log(f"Task to improve: {entry}")
-        problem_statement = diagnose_problem(entry, parent_commit, root_dir, out_dir_base, patch_files=patch_files, polyglot=polyglot)
+        problem_statement = diagnose_problem(
+            entry,
+            parent_commit,
+            root_dir,
+            out_dir_base,
+            patch_files=patch_files,
+            polyglot=polyglot,
+            swebench_pro=swebench_pro,
+        )
         safe_log(f"problem_statement: {problem_statement}")
     else:
         safe_log("No entry provided. Exiting.")
@@ -370,6 +560,7 @@ def self_improve(
 
     # Run self-improvement
     safe_log("Running self-improvement")
+    from prompts.testrepo_prompt import get_test_description
     chat_history_file_container = "/dgm/self_evo.md"
     test_description = get_test_description(swerepo=False)
     env_vars = _collect_runtime_env([
@@ -438,7 +629,29 @@ def self_improve(
     model_name_or_path = run_id
     if model_patch_exists and model_patch_notempty:
         try:
-            if not polyglot:
+            if swebench_pro:
+                run_harness_swebench_pro(
+                    entry,
+                    model_name_or_path,
+                    patch_files,
+                    num_evals,
+                    output_dir,
+                    metadata,
+                    run_id,
+                    test_more_threshold,
+                    test_task_list,
+                    test_task_list_more,
+                    full_eval_threshold,
+                    swebench_pro_dataset_path,
+                    swebench_pro_task_map,
+                    swebench_pro_eval_source,
+                    swebench_pro_scripts_dir,
+                    swebench_pro_dockerhub_username,
+                    swebench_pro_use_local_docker,
+                    swebench_pro_docker_platform,
+                    swebench_pro_block_network,
+                )
+            elif not polyglot:
                 run_harness_swe(entry, model_name_or_path, patch_files, num_evals, output_dir, metadata, run_id, test_more_threshold, test_task_list, test_task_list_more)
             else:
                 run_harness_polyglot(entry, model_name_or_path, patch_files, num_evals, output_dir, metadata, run_id, test_more_threshold, test_task_list, test_task_list_more)

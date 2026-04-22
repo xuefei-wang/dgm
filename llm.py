@@ -46,7 +46,8 @@ AVAILABLE_LLMS = [
 
 
 def _load_shared_env() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
+    path = Path(__file__).resolve()
+    repo_root = path.parents[2] if len(path.parents) > 2 else path.parent
     env_paths = [
         repo_root / "configs" / "providers" / ".env.shared",
         repo_root / "configs" / "providers" / ".env.haiku",
