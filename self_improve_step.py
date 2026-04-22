@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import shutil
 import docker
 from dotenv import load_dotenv
 
@@ -612,8 +613,20 @@ def main():
     parser.add_argument('--test_task_list', default=None, type=str, help='List of tasks to evaluate the self-improvement')
     args = parser.parse_args()
 
-    # Copy cached initial version into experiment dir
-    os.system(f"cp -r initial/ {args.output_dir}")
+    source = Path(__file__).resolve().parent / "initial"
+    if not source.is_dir():
+        raise RuntimeError(f"Expected initial source directory to exist: {source}")
+    output_dir = Path(args.output_dir)
+    if not output_dir.exists():
+        shutil.copytree(source, output_dir)
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for entry in source.iterdir():
+            destination = output_dir / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, destination, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, destination)
 
     metadata = self_improve(
         parent_commit=args.parent_commit,

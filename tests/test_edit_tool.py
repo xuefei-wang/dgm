@@ -4,9 +4,10 @@ import tempfile
 from tools.edit import tool_function
 
 @pytest.fixture
-def temp_dir():
+def temp_dir(monkeypatch):
     """Create a temporary directory for test files."""
     with tempfile.TemporaryDirectory() as tmpdirname:
+        monkeypatch.setenv("DGM_TOOL_ROOT", tmpdirname)
         yield Path(tmpdirname)
 
 @pytest.fixture
@@ -72,7 +73,12 @@ class TestEditorTool:
         """Test operations with invalid path."""
         result = tool_function("view", "/nonexistent/path")
         assert "Error" in result
-        assert "does not exist" in result
+
+    def test_outside_workspace_rejected(self, temp_dir):
+        outside = temp_dir.parent / "outside_path.txt"
+        outside.write_text("nope")
+        result = tool_function("view", str(outside))
+        assert "outside the tool workspace" in result
 
     @pytest.mark.parametrize("command", [
         "unknown_command",

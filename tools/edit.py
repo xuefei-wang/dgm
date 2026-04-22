@@ -1,5 +1,26 @@
 from pathlib import Path
+import os
 import subprocess
+
+def _get_tool_workspace() -> Path:
+    env_root = os.getenv("DGM_TOOL_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    return Path(__file__).resolve().parents[1]
+
+def _validate_workspace_path(path_obj: Path, workspace_root: Path) -> None:
+    try:
+        path_obj_resolved = path_obj.resolve()
+    except FileNotFoundError:
+        path_obj_resolved = path_obj.resolve(strict=False)
+    root = workspace_root.resolve()
+    try:
+        path_obj_resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"The path {path_obj} is outside the tool workspace: {root}"
+        ) from exc
+
 
 def tool_info():
     return {
@@ -46,12 +67,14 @@ def validate_path(path: str, command: str) -> Path:
       - 'edit': path must exist (for overwriting).
     """
     path_obj = Path(path)
+    workspace_root = _get_tool_workspace()
 
     # Check if it's an absolute path
     if not path_obj.is_absolute():
         raise ValueError(
             f"The path {path} is not an absolute path (must start with '/')."
         )
+    _validate_workspace_path(path_obj, workspace_root)
 
     if command == "view":
         # Path must exist

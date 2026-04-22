@@ -31,6 +31,12 @@ class TestBashTool:
         result = tool_function("TEST_VAR='hello' && echo $TEST_VAR")
         assert "hello" in result
 
+    def test_environment_is_sanitized(self, monkeypatch):
+        """Tool session should not leak arbitrary parent environment variables."""
+        monkeypatch.setenv("DGM_TOOL_LEAK_CHECK", "forbidden-by-default")
+        result = tool_function("echo $DGM_TOOL_LEAK_CHECK")
+        assert "forbidden-by-default" not in result
+
     def test_command_output_processing(self):
         """Test processing of command output."""
         commands = [

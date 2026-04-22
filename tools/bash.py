@@ -1,6 +1,17 @@
 import asyncio
 import os
 
+def _build_bash_env() -> dict[str, str]:
+    env = {}
+    for key in ("PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE"):
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
+    if "PATH" not in env:
+        env["PATH"] = "/usr/bin:/bin"
+    return env
+
+
 def tool_info():
     return {
         "name": "bash",
@@ -43,7 +54,7 @@ class BashSession:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy()  # Ensures inheritance of the current environment
+            env=_build_bash_env(),  # Keep environment minimal for tool execution.
         )
         self._started = True
 

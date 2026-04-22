@@ -3,6 +3,7 @@ import logging
 import threading
 from pathlib import Path
 import tarfile
+import os
 from typing import Optional, Union
 import docker
 
@@ -237,14 +238,15 @@ def copy_from_container(container, source_path: Union[str, Path], dest_path: Uni
             # If extracting a single file
             if is_file:
                 member = tar.getmembers()[0]
+                if member.islnk() or member.issym():
+                    raise ValueError(f"Refusing linked tar member: {member.name}")
                 with tar.extractfile(member) as source_file:
                     data = source_file.read()
                     # Write directly to destination file
                     with open(dest_path, 'wb') as dest_file:
                         dest_file.write(data)
             else:
-                # For directories, extract to parent directory
-                tar.extractall(path=str(dest_path.parent))
+                _extract_tar_to_directory(tar, destination=dest_path.parent)
                 # Rename if necessary
                 extracted_path = dest_path.parent / Path(stat['name']).name
                 if extracted_path != dest_path and extracted_path.exists():
@@ -275,3 +277,22 @@ def log_container_output(exec_result):
         error_msg = f"Script failed with exit code {exec_result.exit_code}"
         safe_log(error_msg, logging.ERROR)
         raise Exception(error_msg)
+
+
+def _extract_tar_to_directory(
+    tar: tarfile.TarFile,
+    destination: Path,
+) -> None:
+    """Extract a tar archive while rejecting unsafe members."""
+    base = destination.resolve()
+    for member in tar.getmembers():
+        if member.islnk() or member.issym():
+            raise ValueError(f"Refusing linked tar member: {member.name}")
+        member_path = (base / member.name).resolve()
+        if member_path == base:
+            continue
+        if ".." in Path(member.name).parts or Path(member.name).is_absolute():
+            raise ValueError(f"Unsafe tar member path: {member.name}")
+        if not str(member_path).startswith(str(base) + os.sep):
+            raise ValueError(f"Unsafe tar member path: {member.name}")
+        tar.extract(member, path=str(base))
