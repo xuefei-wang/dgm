@@ -23,6 +23,8 @@ except Exception:  # pragma: no cover - optional when only using helper function
 
 DGM_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(DGM_ROOT) not in sys.path:
+    sys.path.insert(0, str(DGM_ROOT))
 DEFAULT_DATASET_PATH = REPO_ROOT / "benchmarks" / "swebench_pro" / "dataset" / "test.jsonl"
 DEFAULT_TASK_MAP = REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "swebench_pro_test_50_seed0_v1.json"
 DEFAULT_EVAL_SOURCE = REPO_ROOT / "third_party" / "SWE-bench_Pro-os"
