@@ -26,6 +26,29 @@ def test_choose_selfimproves_handles_all_empty_patch_parent(tmp_path):
     assert entries == [("initial", "solve_empty_patches")]
 
 
+def test_choose_selfimproves_handles_missing_predictions_for_unresolved_parent(tmp_path, monkeypatch):
+    parent_dir = tmp_path / "initial"
+    parent_dir.mkdir()
+    (parent_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "overall_performance": {
+                    "accuracy_score": 0.0,
+                    "total_unresolved_ids": ["instance-unresolved"],
+                    "total_emptypatch_ids": [],
+                    "total_resolved_ids": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("DGM_outer.random.random", lambda: 0.5)
+
+    entries = choose_selfimproves(str(tmp_path), ["initial"], 1)
+
+    assert entries == [("initial", "instance-unresolved")]
+
+
 class _FakeExecResult:
     exit_code = 0
     output = b""

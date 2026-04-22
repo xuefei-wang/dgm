@@ -199,6 +199,8 @@ def read_mdlog_file(filepath, filter=True):
 
 def find_selfimprove_eval_logs(entry, out_dir, commit_id='initial', filter=True):
     predictions_dir = os.path.join(out_dir, commit_id, 'predictions')
+    if not os.path.isdir(predictions_dir):
+        return [], [], [], []
     all_preds_folders = [f for f in os.listdir(predictions_dir) if os.path.isdir(os.path.join(predictions_dir, f))]
     prediction_log_files = [os.path.join(predictions_dir, f, f"{entry}.md") for f in all_preds_folders]
     prediction_json_files = [os.path.join(predictions_dir, f, f"{entry}.json") for f in all_preds_folders]

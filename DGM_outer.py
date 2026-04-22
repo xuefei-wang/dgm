@@ -89,6 +89,8 @@ def any_exceeding_context_length(output_dir, commit_id, instance_ids):
     """
     for instance_id in instance_ids:
         md_logs, _, _, _ = find_selfimprove_eval_logs(instance_id, output_dir, commit_id, filter=False)
+        if not md_logs:
+            continue
         md_log = md_logs[0]
         error_str = "Error in get_response_withtools: Error code: 400 - {'message': 'Input is too long for requested model.'}"
         # Repeated error_str means no attempt to fix it
