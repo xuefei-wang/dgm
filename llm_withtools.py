@@ -173,7 +173,7 @@ def convert_tool_info(tool_info, model=None):
                     add_additional_properties(v)
         add_additional_properties(tool_info['input_schema'])
         for p in tool_info['input_schema']['properties'].keys():
-            if not p in tool_info['input_schema']['required']:
+            if p not in tool_info['input_schema']['required']:
                 tool_info['input_schema']['required'].append(p)
                 t = copy.deepcopy(tool_info['input_schema']['properties'][p]["type"])
                 if isinstance(t, str):
@@ -535,10 +535,7 @@ def chat_with_agent_openai(
                     break
             if tool_call is None:
                 break
-            for output_item in response.output:
-                new_msg_history.append(output_item)
-                if output_item is tool_call:
-                    break
+            new_msg_history.extend(response.output)
             new_msg_history.append({
                 "type": "function_call_output",
                 "call_id": tool_use['tool_id'],

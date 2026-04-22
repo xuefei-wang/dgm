@@ -88,6 +88,7 @@ def _runtime_env() -> dict[str, str]:
             "DGM_DIAGNOSE_MODEL",
             "DGM_REASONING_EFFORT",
             "OPENAI_REASONING_EFFORT",
+            "REASONING_EFFORT",
         ]
     )
 
