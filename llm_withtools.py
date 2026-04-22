@@ -37,7 +37,7 @@ def _load_shared_env() -> None:
 _load_shared_env()
 
 CLAUDE_MODEL = os.getenv('DGM_CLAUDE_MODEL', 'bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0')
-OPENAI_MODEL = os.getenv('DGM_OPENAI_MODEL', 'o3-mini-2025-01-31')
+OPENAI_MODEL = os.getenv('DGM_OPENAI_MODEL', 'gpt-5.4-mini')
 
 
 def response_output_text(response):
@@ -474,7 +474,7 @@ def chat_with_agent_claude(
 
 def chat_with_agent_openai(
         msg,
-        model='o3-mini-2025-01-31',
+        model='gpt-5.4-mini',
         msg_history=None,
         logging=print,
     ):
