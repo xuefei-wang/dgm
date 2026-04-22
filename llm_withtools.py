@@ -535,7 +535,10 @@ def chat_with_agent_openai(
                     break
             if tool_call is None:
                 break
-            new_msg_history.append(tool_call)
+            for output_item in response.output:
+                new_msg_history.append(output_item)
+                if output_item is tool_call:
+                    break
             new_msg_history.append({
                 "type": "function_call_output",
                 "call_id": tool_use['tool_id'],

@@ -32,6 +32,19 @@ export ANTHROPIC_API_KEY='...'
 export DGM_CODE_MODEL='claude-haiku-4-5-20251001'
 ```
 
+Optional model/profile settings can be supplied with DGM-specific variables:
+
+```bash
+export DGM_OPENAI_MODEL='gpt-5.4-mini'
+export DGM_CODE_MODEL='gpt-5.4-mini'
+export DGM_SELF_IMPROVE_MODEL='gpt-5.4-mini'
+export DGM_DIAGNOSE_MODEL='gpt-5.4-mini'
+export DGM_REASONING_EFFORT='medium'
+```
+
+For a Haiku run, set the same `DGM_*_MODEL` variables to the desired Claude
+model and provide `ANTHROPIC_API_KEY`.
+
 ```bash
 # Verify that Docker is properly configured in your environment.
 docker run hello-world
