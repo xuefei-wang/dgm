@@ -33,6 +33,76 @@ def _validated_report_ids(report: dict, field: str, expected: set[str]) -> list[
     return sorted(values)
 
 
+def _prediction_task_id(path: Path) -> str | None:
+    name = path.name
+    if name.endswith("_eval.md"):
+        return name[: -len("_eval.md")]
+    if name.endswith(".json"):
+        return name[:-len(".json")]
+    if name.endswith(".md"):
+        return name[:-len(".md")]
+    return None
+
+
+def validate_predictions_dir(predictions_dir: Path, task_ids: list[str]) -> Path:
+    if not predictions_dir.is_dir():
+        raise FileNotFoundError(f"Predictions directory does not exist: {predictions_dir}")
+
+    run_dirs = sorted(path for path in predictions_dir.iterdir() if path.is_dir())
+    if not run_dirs:
+        raise FileNotFoundError(f"No prediction run directories found under {predictions_dir}")
+    if len(run_dirs) != 1:
+        raise ValueError(
+            "Expected exactly one prediction run directory for Polyglot initial metadata, "
+            f"found {len(run_dirs)} under {predictions_dir}"
+        )
+
+    expected = set(task_ids)
+    run_dir = run_dirs[0]
+    missing = []
+    for task_id in task_ids:
+        required_files = (
+            run_dir / f"{task_id}.json",
+            run_dir / f"{task_id}.md",
+            run_dir / f"{task_id}_eval.md",
+        )
+        if not all(path.is_file() for path in required_files):
+            missing.append(task_id)
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing prediction JSON, agent log, or eval log for Polyglot tasks: "
+            f"{missing[:10]}"
+        )
+
+    extra_files = []
+    for path in sorted(run_dir.iterdir()):
+        if not path.is_file():
+            continue
+        task_id = _prediction_task_id(path)
+        if task_id is not None and task_id not in expected:
+            extra_files.append(path.name)
+
+    if extra_files:
+        raise ValueError(
+            "Predictions directory contains files outside task map: "
+            f"{extra_files[:10]}"
+        )
+
+    return run_dir
+
+
+def package_predictions_dir(predictions_dir: Path, task_ids: list[str], output_dir: Path) -> None:
+    run_dir = validate_predictions_dir(predictions_dir, task_ids)
+    packaged_run_dir = output_dir / "predictions" / run_dir.name
+    packaged_run_dir.mkdir(parents=True, exist_ok=True)
+
+    for task_id in task_ids:
+        for suffix in (".json", ".md", "_eval.md"):
+            source = run_dir / f"{task_id}{suffix}"
+            shutil.copy2(source, packaged_run_dir / source.name)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True, help="Polyglot harness report JSON.")
@@ -77,8 +147,7 @@ def main() -> None:
     packaged_report = args.output_dir / args.report.name
     shutil.copy2(args.report.resolve(), packaged_report)
     if args.predictions_dir:
-        packaged_predictions = args.output_dir / "predictions"
-        shutil.copytree(args.predictions_dir.resolve(), packaged_predictions, dirs_exist_ok=True)
+        package_predictions_dir(args.predictions_dir.resolve(), task_ids, args.output_dir)
 
     metadata = {
         "run_id": "initial",
