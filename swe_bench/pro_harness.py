@@ -32,6 +32,7 @@ DEFAULT_TASK_MAP = REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "sw
 DEFAULT_EVAL_SOURCE = REPO_ROOT / "third_party" / "SWE-bench_Pro-os"
 DEFAULT_SCRIPTS_DIR = DEFAULT_EVAL_SOURCE / "run_scripts"
 DEFAULT_DOCKERHUB_USERNAME = "jefzda"
+AGENT_PIP_INDEX_URL = "https://pypi.org/simple"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -91,6 +92,29 @@ def _runtime_env() -> dict[str, str]:
             "REASONING_EFFORT",
         ]
     )
+
+
+def _agent_pip_install_command(python_bin: str, *, break_system_packages: bool) -> str:
+    cmd = [
+        "env",
+        "-u",
+        "PIP_INDEX_URL",
+        "-u",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_CONFIG_FILE=/dev/null",
+        "PIP_DISABLE_PIP_VERSION_CHECK=1",
+        python_bin,
+        "-m",
+        "pip",
+        "install",
+        "--isolated",
+        "--index-url",
+        AGENT_PIP_INDEX_URL,
+    ]
+    if break_system_packages:
+        cmd.append("--break-system-packages")
+    cmd.extend(["-r", "/dgm/requirements.txt"])
+    return shlex.join(cmd)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -335,14 +359,16 @@ def _setup_agent_python(container, python_bin: str) -> str:
     from swe_bench.utils import log_container_output
 
     marker = "__DGM_AGENT_PYTHON__:"
+    venv_install_cmd = _agent_pip_install_command("/dgm/.venv/bin/python", break_system_packages=False)
+    system_install_cmd = _agent_pip_install_command(python_bin, break_system_packages=True)
     setup_cmd = f"""
 set -e
-if {python_bin} -m venv /dgm/.venv; then
-  /dgm/.venv/bin/python -m pip install -r /dgm/requirements.txt
-  echo {marker}/dgm/.venv/bin/python
+if {shlex.quote(python_bin)} -m venv /dgm/.venv; then
+  {venv_install_cmd}
+  echo {shlex.quote(marker + "/dgm/.venv/bin/python")}
 else
-  {python_bin} -m pip install --break-system-packages -r /dgm/requirements.txt
-  echo {marker}{python_bin}
+  {system_install_cmd}
+  echo {shlex.quote(marker + python_bin)}
 fi
 """
     result = container.exec_run(["/bin/bash", "-lc", setup_cmd], workdir="/")
@@ -768,7 +794,9 @@ def _write_eval_logs(
         )
 
 
-def build_report(entries: list[dict[str, Any]], results: list[dict[str, Any]], eval_results: dict[str, bool]) -> dict[str, Any]:
+def build_report(
+    entries: list[dict[str, Any]], results: list[dict[str, Any]], eval_results: dict[str, bool]
+) -> dict[str, Any]:
     submitted_ids = [validate_instance_id(result["instance_id"]) for result in results]
     completed_ids = [validate_instance_id(result["instance_id"]) for result in results if result.get("success")]
     incomplete_ids = [validate_instance_id(result["instance_id"]) for result in results if not result.get("success")]
@@ -931,9 +959,13 @@ def main() -> None:
     parser.add_argument("--eval-source", type=Path, default=DEFAULT_EVAL_SOURCE)
     parser.add_argument("--scripts-dir", type=Path, default=None)
     parser.add_argument("--dockerhub-username", default=DEFAULT_DOCKERHUB_USERNAME)
-    parser.add_argument("--no-local-docker", action="store_true", help="Use Modal instead of local Docker for official eval.")
+    parser.add_argument(
+        "--no-local-docker", action="store_true", help="Use Modal instead of local Docker for official eval."
+    )
     parser.add_argument("--docker-platform", default=None)
-    parser.add_argument("--block-network", action="store_true", help="Block network during official evaluation containers.")
+    parser.add_argument(
+        "--block-network", action="store_true", help="Block network during official evaluation containers."
+    )
     args = parser.parse_args()
 
     model_patch_paths = args.model_patch_paths.split(",") if args.model_patch_paths else None
