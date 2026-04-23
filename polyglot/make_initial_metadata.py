@@ -20,6 +20,19 @@ def _duplicate_ids(values):
     return sorted(value for value, count in counts.items() if count > 1)
 
 
+def _validated_report_ids(report: dict, field: str, expected: set[str]) -> list[str]:
+    values = report.get(field, [])
+    duplicate_ids = _duplicate_ids(values)
+    if duplicate_ids:
+        raise ValueError(f"Report {field} contains duplicate IDs: {duplicate_ids[:10]}")
+
+    extra_ids = sorted(set(values) - expected)
+    if extra_ids:
+        raise ValueError(f"Report {field} contains IDs outside task map: {extra_ids[:10]}")
+
+    return sorted(values)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True, help="Polyglot harness report JSON.")
@@ -38,27 +51,19 @@ def main() -> None:
     if duplicate_task_ids:
         raise ValueError(f"Task map contains duplicate IDs: {duplicate_task_ids[:10]}")
 
-    submitted_ids = report.get("submitted_ids", [])
-    duplicate_submitted_ids = _duplicate_ids(submitted_ids)
-    if duplicate_submitted_ids:
-        raise ValueError(f"Report submitted_ids contains duplicate IDs: {duplicate_submitted_ids[:10]}")
-
-    duplicate_resolved_ids = _duplicate_ids(report.get("resolved_ids", []))
-    if duplicate_resolved_ids:
-        raise ValueError(f"Report resolved_ids contains duplicate IDs: {duplicate_resolved_ids[:10]}")
-
     expected = set(task_ids)
+    submitted_ids = _validated_report_ids(report, "submitted_ids", expected)
     submitted = set(submitted_ids)
     if submitted != expected:
         missing = sorted(expected - submitted)
         extra = sorted(submitted - expected)
         raise ValueError(f"Report submitted IDs do not match task map. missing={missing[:10]} extra={extra[:10]}")
 
-    resolved_ids = sorted(report.get("resolved_ids", []))
-    unresolved_ids = sorted(report.get("unresolved_ids", []))
-    empty_patch_ids = sorted(report.get("empty_patch_ids", []))
-    incomplete_ids = sorted(report.get("incomplete_ids", []))
-    error_ids = sorted(report.get("error_ids", []))
+    resolved_ids = _validated_report_ids(report, "resolved_ids", expected)
+    unresolved_ids = _validated_report_ids(report, "unresolved_ids", expected)
+    empty_patch_ids = _validated_report_ids(report, "empty_patch_ids", expected)
+    incomplete_ids = _validated_report_ids(report, "incomplete_ids", expected)
+    error_ids = _validated_report_ids(report, "error_ids", expected)
 
     # DGM samples self-improvement entries from unresolved and empty-patch IDs.
     # Treat incomplete/error runs as unresolved so the initial parent still covers
