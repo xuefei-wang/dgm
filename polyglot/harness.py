@@ -268,6 +268,49 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         except Exception as e:
             print(f"Error cleaning up Docker container for {instance_id}: {e}")
 
+
+def build_report(entries, results):
+    incomplete_ids = [result["instance_id"] for result in results if not result["success"]]
+    completed_ids = [result["instance_id"] for result in results if result["success"]]
+    resolved_ids = []
+    unresolved_ids = []
+    error_ids = []
+    empty_patch_ids = []
+    unstopped_containers = []
+    unremoved_images = []
+
+    for result in results:
+        if result["success"]:
+            if result.get("eval_result") == "resolved":
+                resolved_ids.append(result["instance_id"])
+            elif result.get("eval_result") == "unresolved":
+                unresolved_ids.append(result["instance_id"])
+            elif result.get("eval_result") == "empty_patch":
+                empty_patch_ids.append(result["instance_id"])
+            else:
+                error_ids.append(result["instance_id"])
+
+    return {
+        "total_instances": len(entries),
+        "submitted_instances": len(results),
+        "completed_instances": len(completed_ids),
+        "resolved_instances": len(resolved_ids),
+        "unresolved_instances": len(unresolved_ids),
+        "empty_patch_instances": len(empty_patch_ids),
+        "error_instances": len(error_ids),
+        "unstopped_instances": len(unstopped_containers),
+        "completed_ids": list(sorted(completed_ids)),
+        "incomplete_ids": list(sorted(incomplete_ids)),
+        "empty_patch_ids": list(sorted(empty_patch_ids)),
+        "submitted_ids": list(sorted(result["instance_id"] for result in results)),
+        "resolved_ids": list(sorted(resolved_ids)),
+        "unresolved_ids": list(sorted(unresolved_ids)),
+        "error_ids": list(sorted(error_ids)),
+        "unstopped_containers": list(sorted(unstopped_containers)),
+        "unremoved_images": list(sorted(unremoved_images)),
+        "schema_version": 2,
+    }
+
 def harness(
         dataset_path=None,
         test_task_list=None,
@@ -372,48 +415,7 @@ def harness(
     print(f"All evaluations completed for model {model_name_or_path}")
 
     # Directly generate report
-    # write report to file
-    incomplete_ids = [result["instance_id"] for result in results if not result["success"]]
-    completed_ids = [result["instance_id"] for result in results if result["success"]]
-    # Get resolved/unresolved/error/empty patch IDs from results
-    resolved_ids = []
-    unresolved_ids = []
-    error_ids = []
-    empty_patch_ids = []
-    unstopped_containers = []
-    unremoved_images = []
-
-    for result in results:
-        if result["success"]:
-            if result.get("eval_result") == "resolved":
-                resolved_ids.append(result["instance_id"])
-            elif result.get("eval_result") == "unresolved":
-                unresolved_ids.append(result["instance_id"])
-            elif result.get("eval_result") == "empty_patch":
-                empty_patch_ids.append(result["instance_id"])
-            else:
-                error_ids.append(result["instance_id"])
-
-    report = {
-        "total_instances": len(dataset),
-        "submitted_instances": len(results),
-        "completed_instances": len(completed_ids),
-        "resolved_instances": len(resolved_ids),
-        "unresolved_instances": len(unresolved_ids),
-        "empty_patch_instances": len(empty_patch_ids),
-        "error_instances": len(error_ids),
-        "unstopped_instances": len(unstopped_containers),
-        "completed_ids": list(sorted(completed_ids)),
-        "incomplete_ids": list(sorted(incomplete_ids)),
-        "empty_patch_ids": list(sorted(empty_patch_ids)),
-        "submitted_ids": list(sorted(result["instance_id"] for result in results)),
-        "resolved_ids": list(sorted(resolved_ids)),
-        "unresolved_ids": list(sorted(unresolved_ids)),
-        "error_ids": list(sorted(error_ids)),
-        "unstopped_containers": list(sorted(unstopped_containers)),
-        "unremoved_images": list(sorted(unremoved_images)),
-        "schema_version": 2,
-    }
+    report = build_report(entries, results)
 
     print(report)
     report_file = output_dir / Path(
