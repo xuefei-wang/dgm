@@ -39,7 +39,7 @@ def build_metadata(report: dict, task_ids: list[str], packaged_report: Path) -> 
     error_ids = sorted(report.get("error_ids", []))
 
     total_unresolved_ids = sorted(set(unresolved_ids + incomplete_ids + error_ids))
-    submitted_instances = int(report.get("submitted_instances", len(task_ids)))
+    submitted_instances = len(submitted)
     resolved_instances = len(resolved_ids)
     accuracy_score = resolved_instances / submitted_instances if submitted_instances else 0.0
 
@@ -92,8 +92,8 @@ def main() -> None:
     parser.add_argument(
         "--predictions-dir",
         type=Path,
-        required=True,
-        help="Harness predictions directory to package for DGM diagnosis.",
+        default=None,
+        help="Optional harness predictions directory to package for DGM diagnosis.",
     )
     args = parser.parse_args()
 
@@ -101,13 +101,14 @@ def main() -> None:
     task_ids = load_task_ids(args.task_map.resolve())
     if task_ids is None:
         raise ValueError(f"No task IDs loaded from {args.task_map}")
-    validate_predictions_dir(args.predictions_dir.resolve(), task_ids)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     packaged_report = args.output_dir / args.report.name
     shutil.copy2(args.report.resolve(), packaged_report)
-    packaged_predictions = args.output_dir / "predictions"
-    shutil.copytree(args.predictions_dir.resolve(), packaged_predictions, dirs_exist_ok=True)
+    if args.predictions_dir is not None:
+        validate_predictions_dir(args.predictions_dir.resolve(), task_ids)
+        packaged_predictions = args.output_dir / "predictions"
+        shutil.copytree(args.predictions_dir.resolve(), packaged_predictions, dirs_exist_ok=True)
 
     metadata = build_metadata(report, task_ids, packaged_report)
     output_path = args.output_dir / "metadata.json"
