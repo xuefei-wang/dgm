@@ -88,7 +88,10 @@ def any_exceeding_context_length(output_dir, commit_id, instance_ids):
     Check if any of the issues have exceeded the context length.
     """
     for instance_id in instance_ids:
-        md_logs, _, _, _ = find_selfimprove_eval_logs(instance_id, output_dir, commit_id, filter=False)
+        try:
+            md_logs, _, _, _ = find_selfimprove_eval_logs(instance_id, output_dir, commit_id, filter=False)
+        except FileNotFoundError:
+            continue
         if not md_logs:
             continue
         md_log = md_logs[0]
@@ -127,6 +130,9 @@ def choose_selfimproves(output_dir, archive, selfimprove_size, method='random', 
             continue
 
     # Choose parents based on method and baseline
+    if not candidates:
+        return selfimprove_entries
+
     if run_baseline == 'no_darwin':
         # Always take the last commit
         commits = list(candidates.keys())
