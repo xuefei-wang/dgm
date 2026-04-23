@@ -33,10 +33,7 @@ def main() -> None:
     if submitted != expected:
         missing = sorted(expected - submitted)
         extra = sorted(submitted - expected)
-        raise ValueError(
-            "Report submitted IDs do not match task map. "
-            f"missing={missing[:10]} extra={extra[:10]}"
-        )
+        raise ValueError(f"Report submitted IDs do not match task map. missing={missing[:10]} extra={extra[:10]}")
 
     resolved_ids = sorted(report.get("resolved_ids", []))
     unresolved_ids = sorted(report.get("unresolved_ids", []))
@@ -48,7 +45,7 @@ def main() -> None:
     # Treat incomplete/error runs as unresolved so the initial parent still covers
     # exactly the benchmark task map denominator.
     total_unresolved_ids = sorted(set(unresolved_ids + incomplete_ids + error_ids))
-    submitted_instances = int(report.get("submitted_instances", len(task_ids)))
+    submitted_instances = len(task_ids)
     resolved_instances = len(resolved_ids)
     accuracy_score = resolved_instances / submitted_instances if submitted_instances else 0.0
 
