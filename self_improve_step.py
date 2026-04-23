@@ -22,7 +22,7 @@ def _load_shared_env() -> None:
     ]
     for env_path in env_paths:
         if env_path.exists():
-            load_dotenv(env_path, override=True)
+            load_dotenv(env_path, override=False)
 
 
 def _collect_runtime_env(names):

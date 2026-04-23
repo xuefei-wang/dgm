@@ -57,7 +57,7 @@ def _load_shared_env() -> None:
         REPO_ROOT / "configs" / "models" / "shared.env",
     ]:
         if env_path.exists():
-            load_dotenv(env_path, override=True)
+            load_dotenv(env_path, override=False)
 
 
 def _collect_runtime_env(names: list[str]) -> dict[str, str]:

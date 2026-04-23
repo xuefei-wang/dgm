@@ -37,7 +37,7 @@ EXERCISES_DIR_DEFAULT = "polyglot-benchmark"
 app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 
 def find_latest_benchmark_dir():
