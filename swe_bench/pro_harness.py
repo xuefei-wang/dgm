@@ -74,14 +74,22 @@ def _runtime_env() -> dict[str, str]:
     return _collect_runtime_env(
         [
             "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_BEDROCK_BASE_URL",
             "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT_ID",
             "GEMINI_API_KEY",
             "OPENROUTER_API_KEY",
             "DEEPSEEK_API_KEY",
             "AWS_REGION",
             "AWS_REGION_NAME",
+            "AWS_DEFAULT_REGION",
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
             "DGM_CLAUDE_MODEL",
             "DGM_OPENAI_MODEL",
             "DGM_CODE_MODEL",
@@ -348,35 +356,32 @@ def _dockerhub_image_uri(entry: dict[str, Any], dockerhub_username: str) -> str:
 
 
 def _container_python(container) -> str:
-    for candidate in ("python", "python3"):
-        result = container.exec_run([candidate, "--version"], workdir="/")
-        if result.exit_code == 0:
+    probe = "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"
+    for candidate in ("python3", "python"):
+        result = container.exec_run([candidate, "-c", probe], workdir="/")
+        if result.exit_code == 0 and result.output.decode("utf-8", errors="ignore").startswith("3."):
             return candidate
-    raise RuntimeError("Could not find python or python3 in the SWE-bench Pro container")
+    raise RuntimeError("Could not find a usable Python 3 interpreter in the SWE-bench Pro container")
 
 
 def _setup_agent_python(container, python_bin: str) -> str:
     from swe_bench.utils import log_container_output
 
-    marker = "__DGM_AGENT_PYTHON__:"
     venv_install_cmd = _agent_pip_install_command("/dgm/.venv/bin/python", break_system_packages=False)
     system_install_cmd = _agent_pip_install_command(python_bin, break_system_packages=True)
-    setup_cmd = f"""
-set -e
-if {shlex.quote(python_bin)} -m venv /dgm/.venv; then
-  {venv_install_cmd}
-  echo {shlex.quote(marker + "/dgm/.venv/bin/python")}
-else
-  {system_install_cmd}
-  echo {shlex.quote(marker + python_bin)}
-fi
-"""
-    result = container.exec_run(["/bin/bash", "-lc", setup_cmd], workdir="/")
+
+    result = container.exec_run([python_bin, "-m", "venv", "/dgm/.venv"], workdir="/")
+    log_container_output(result, raise_error=False)
+    if result.exit_code == 0:
+        result = container.exec_run(["/bin/bash", "-lc", venv_install_cmd], workdir="/")
+        log_container_output(result, raise_error=False)
+        if result.exit_code == 0:
+            return "/dgm/.venv/bin/python"
+        log_container_output(container.exec_run(["rm", "-rf", "/dgm/.venv"], workdir="/"), raise_error=False)
+
+    result = container.exec_run(["/bin/bash", "-lc", system_install_cmd], workdir="/")
     log_container_output(result)
-    for line in reversed(result.output.decode("utf-8").splitlines()):
-        if line.startswith(marker):
-            return line.removeprefix(marker).strip()
-    raise RuntimeError("Could not determine agent Python executable")
+    return python_bin
 
 
 def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
