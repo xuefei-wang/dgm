@@ -6,12 +6,18 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from collections import Counter
 from pathlib import Path
 
 
 def load_json(path: Path):
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _duplicate_ids(values):
+    counts = Counter(values)
+    return sorted(value for value, count in counts.items() if count > 1)
 
 
 def main() -> None:
@@ -28,8 +34,21 @@ def main() -> None:
 
     report = load_json(args.report.resolve())
     task_ids = load_json(args.task_map.resolve())
+    duplicate_task_ids = _duplicate_ids(task_ids)
+    if duplicate_task_ids:
+        raise ValueError(f"Task map contains duplicate IDs: {duplicate_task_ids[:10]}")
+
+    submitted_ids = report.get("submitted_ids", [])
+    duplicate_submitted_ids = _duplicate_ids(submitted_ids)
+    if duplicate_submitted_ids:
+        raise ValueError(f"Report submitted_ids contains duplicate IDs: {duplicate_submitted_ids[:10]}")
+
+    duplicate_resolved_ids = _duplicate_ids(report.get("resolved_ids", []))
+    if duplicate_resolved_ids:
+        raise ValueError(f"Report resolved_ids contains duplicate IDs: {duplicate_resolved_ids[:10]}")
+
     expected = set(task_ids)
-    submitted = set(report.get("submitted_ids", []))
+    submitted = set(submitted_ids)
     if submitted != expected:
         missing = sorted(expected - submitted)
         extra = sorted(submitted - expected)

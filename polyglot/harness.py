@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 import tempfile
+from collections import Counter
 from enum import Enum
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -51,6 +52,11 @@ def _collect_runtime_env(names):
 
 def get_eval_script(commands):
     return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + commands) + "\n"
+
+
+def _duplicate_ids(values):
+    counts = Counter(values)
+    return sorted(value for value, count in counts.items() if count > 1)
 
 
 def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
@@ -344,14 +350,28 @@ def harness(
 
     # Prepare the dataset entries
     entries = list(dataset)
-    if test_task_list:
-        entries = [entry for entry in entries if entry["instance_id"] in test_task_list]
+    dataset_ids = [entry["instance_id"] for entry in entries]
+    duplicate_dataset_ids = _duplicate_ids(dataset_ids)
+    if duplicate_dataset_ids:
+        raise ValueError(f"Dataset contains duplicate instance IDs: {duplicate_dataset_ids[:10]}")
+
+    if test_task_list is not None:
+        requested_ids = list(test_task_list)
+        duplicate_requested_ids = _duplicate_ids(requested_ids)
+        if duplicate_requested_ids:
+            raise ValueError(f"Requested task list contains duplicate IDs: {duplicate_requested_ids[:10]}")
+        entry_by_id = {entry["instance_id"]: entry for entry in entries}
+        missing_task_ids = sorted(set(requested_ids) - set(entry_by_id))
+        if missing_task_ids:
+            raise ValueError(f"Requested task IDs not found in dataset: {missing_task_ids[:10]}")
+        entries = [entry_by_id[task_id] for task_id in requested_ids]
     if num_samples > 0:
         entries = entries[:num_samples]
 
     # Build the environment images
-    client = docker.from_env()
-    build_env_images(client, dataset=entries, max_workers=max_workers, force_rebuild=False)
+    if entries:
+        client = docker.from_env()
+        build_env_images(client, dataset=entries, max_workers=max_workers, force_rebuild=False)
 
     # Define a function to handle a single evaluation for all specified issues
     def process_evaluation(eval_idx):
@@ -401,8 +421,8 @@ def harness(
 
 
 def build_report(entries, results):
-    incomplete_ids = [result["instance_id"] for result in results if not result["success"]]
-    completed_ids = [result["instance_id"] for result in results if result["success"]]
+    incomplete_ids = []
+    completed_ids = []
     resolved_ids = []
     unresolved_ids = []
     error_ids = []
@@ -412,7 +432,12 @@ def build_report(entries, results):
 
     for result in results:
         if not result["success"]:
+            if result.get("eval_result") == "error":
+                error_ids.append(result["instance_id"])
+            else:
+                incomplete_ids.append(result["instance_id"])
             continue
+        completed_ids.append(result["instance_id"])
         if result.get("eval_result") == "resolved":
             resolved_ids.append(result["instance_id"])
         elif result.get("eval_result") == "unresolved":
