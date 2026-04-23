@@ -132,6 +132,14 @@ def _first_not_none(*values):
     return None
 
 
+def _bedrock_region() -> str | None:
+    return _first_not_none(
+        os.getenv("AWS_REGION_NAME"),
+        os.getenv("AWS_REGION"),
+        os.getenv("AWS_DEFAULT_REGION"),
+    )
+
+
 def extract_token_usage(response, model: str = "") -> dict:
     """Normalize provider usage metadata without mutating API message history."""
     raw_usage = _plain_usage_value(getattr(response, "usage", None))
@@ -195,7 +203,8 @@ def create_client(model: str):
         client = anthropic.AnthropicBedrock(
             aws_access_key=os.getenv("AWS_ACCESS_KEY_ID"),
             aws_secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            aws_region=os.getenv("AWS_REGION_NAME"),
+            aws_region=_bedrock_region(),
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
         )
         return client, client_model
     elif model.startswith("vertex_ai") and "claude" in model:
