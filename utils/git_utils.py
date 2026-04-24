@@ -2,6 +2,61 @@ import os
 import git
 import subprocess
 
+GENERATED_DIR_NAMES = {
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".venv",
+    "venv",
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "coverage",
+    "appendonlydir",
+}
+
+GENERATED_FILE_NAMES = {
+    "Cargo.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "dump.rdb",
+}
+
+GENERATED_SUFFIXES = (
+    ".pyc",
+    ".pyo",
+    ".pyd",
+    ".so",
+    ".o",
+    ".obj",
+    ".a",
+    ".class",
+    ".log",
+    ".rdb",
+    ".aof",
+    ".manifest",
+)
+
+
+def _should_include_untracked_file(path):
+    normalized = path.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    if any(part in GENERATED_DIR_NAMES for part in parts[:-1]):
+        return False
+    filename = parts[-1]
+    if filename in GENERATED_FILE_NAMES:
+        return False
+    if any(filename.endswith(suffix) for suffix in GENERATED_SUFFIXES):
+        return False
+    return True
+
 
 def get_git_commit_hash(repo_path='.'):
     try:
@@ -50,6 +105,8 @@ def diff_versus_commit(git_dname, commit):
 
     # Generate diffs for untracked files
     for file in untracked_files:
+        if not _should_include_untracked_file(file):
+            continue
         # Diff untracked file against /dev/null (empty file)
         file_path = os.path.join(git_dname, file)
         devnull = '/dev/null'

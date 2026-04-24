@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 
 def tool_info():
     return {
@@ -51,7 +52,10 @@ class BashSession:
         if not self._started:
             return
         if self._process.returncode is None:
-            self._process.terminate()
+            try:
+                os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         self._process = None
         self._started = False
 
@@ -130,9 +134,8 @@ def filter_error(error):
 
 async def tool_function_call(command):
     """Execute a command in the bash shell."""
+    bash_session = BashSession()
     try:
-        bash_session = BashSession()
-
         if not bash_session._started:
             await bash_session.start()
 
@@ -146,6 +149,8 @@ async def tool_function_call(command):
         return result.strip()
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        bash_session.stop()
 
 def tool_function(command):
     return asyncio.run(tool_function_call(command))
