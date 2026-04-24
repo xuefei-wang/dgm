@@ -799,8 +799,66 @@ def _write_eval_logs(
         )
 
 
+_TOKEN_USAGE_RE = re.compile(r'^TOKEN_USAGE (\{.*\})\s*$', re.MULTILINE)
+
+
+def _aggregate_token_usage(out_dname: Path) -> dict[str, Any]:
+    """Scan per-task `.md` chat logs for TOKEN_USAGE records emitted by
+    ``baselines/dgm/llm.log_token_usage`` and aggregate into a single
+    ``llm_usage`` block for the harness report.
+
+    Returns an empty dict if the directory has no per-task logs yet.
+    """
+    if out_dname is None or not out_dname.exists():
+        return {}
+
+    per_instance: dict[str, dict[str, int]] = {}
+    totals = {
+        "calls": 0,
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "total_tokens": 0,
+    }
+    malformed = 0
+
+    for md_path in sorted(out_dname.glob("instance_*.md")):
+        if md_path.name.endswith("_eval.md"):
+            continue
+        instance_id = md_path.stem
+        try:
+            text = md_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        per = {k: 0 for k in totals}
+        for match in _TOKEN_USAGE_RE.finditer(text):
+            try:
+                rec = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                malformed += 1
+                continue
+            per["calls"] += 1
+            for key in ("input_tokens", "cached_tokens", "output_tokens",
+                        "reasoning_tokens", "total_tokens"):
+                per[key] += int(rec.get(key) or 0)
+        if per["calls"]:
+            per_instance[instance_id] = per
+            for k in totals:
+                totals[k] += per[k]
+
+    if not per_instance and not malformed:
+        return {}
+    return {
+        **totals,
+        "malformed_records": malformed,
+        "per_instance": per_instance,
+    }
+
+
 def build_report(
-    entries: list[dict[str, Any]], results: list[dict[str, Any]], eval_results: dict[str, bool]
+    entries: list[dict[str, Any]], results: list[dict[str, Any]], eval_results: dict[str, bool],
+    out_dname: Path | None = None,
 ) -> dict[str, Any]:
     submitted_ids = [validate_instance_id(result["instance_id"]) for result in results]
     completed_ids = [validate_instance_id(result["instance_id"]) for result in results if result.get("success")]
@@ -840,6 +898,7 @@ def build_report(
         "unstopped_containers": [],
         "unremoved_images": [],
         "schema_version": "swebench_pro_v1",
+        "llm_usage": _aggregate_token_usage(out_dname) if out_dname is not None else {},
     }
 
 
@@ -942,7 +1001,7 @@ def harness(
             prefix=model_name_or_path_inst,
             eval_results=eval_results,
         )
-        report = build_report(entries, results, eval_results)
+        report = build_report(entries, results, eval_results, out_dname=out_dname)
         report_file = output_dir / f"{model_name_or_path.replace('/', '__')}_{eval_idx}.000.json"
         report_file.write_text(json.dumps(report, indent=4), encoding="utf-8")
         print(f"Report written to {report_file}")
