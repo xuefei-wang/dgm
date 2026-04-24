@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import glob
 import json
 import os
 import tempfile
@@ -269,7 +270,73 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             print(f"Error cleaning up Docker container for {instance_id}: {e}")
 
 
-def build_report(entries, results):
+def _aggregate_token_usage(pred_dir):
+    """Aggregate TOKEN_USAGE records from per-task markdown chat histories.
+
+    DGM's ``llm.py`` / ``llm_withtools.py`` emit ``TOKEN_USAGE {...json...}``
+    lines into each task's chat markdown under ``pred_dir``. This mirrors the
+    swebench_pro TOKEN_USAGE aggregator (DGM PR #11) so polyglot report.json
+    exposes the same ``llm_usage`` block that downstream sweep aggregation
+    expects from every benchmark.
+    """
+    aggregate = {
+        "calls": 0,
+        "malformed_records": 0,
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "uncached_prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    saw_cost = False
+    if pred_dir is None:
+        aggregate["cost_usd"] = None
+        return aggregate
+
+    md_files = sorted(glob.glob(os.path.join(str(pred_dir), "*.md")))
+    for md_path in md_files:
+        try:
+            with open(md_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if "TOKEN_USAGE" not in line:
+                        continue
+                    split_result = line.split("TOKEN_USAGE", 1)
+                    payload = split_result[1].lstrip(": ").strip()
+                    try:
+                        record = json.loads(payload)
+                    except json.JSONDecodeError:
+                        aggregate["malformed_records"] += 1
+                        continue
+
+                    input_tokens = int(record.get("input_tokens") or 0)
+                    output_tokens = int(record.get("output_tokens") or 0)
+                    total_tokens = int(record.get("total_tokens") or 0)
+                    cached_tokens = int(record.get("cached_tokens") or 0)
+                    reasoning_tokens = int(record.get("reasoning_tokens") or 0)
+
+                    aggregate["calls"] += 1
+                    aggregate["prompt_tokens"] += input_tokens
+                    aggregate["cached_prompt_tokens"] += cached_tokens
+                    aggregate["uncached_prompt_tokens"] += max(input_tokens - cached_tokens, 0)
+                    aggregate["completion_tokens"] += output_tokens
+                    aggregate["total_tokens"] += total_tokens or input_tokens + output_tokens
+                    aggregate["reasoning_tokens"] += reasoning_tokens
+
+                    cost = record.get("cost_usd")
+                    if isinstance(cost, (int, float)):
+                        aggregate["cost_usd"] += float(cost)
+                        saw_cost = True
+        except OSError:
+            continue
+
+    if not saw_cost:
+        aggregate["cost_usd"] = None
+    return aggregate
+
+
+def build_report(entries, results, pred_dir=None):
     incomplete_ids = [result["instance_id"] for result in results if not result["success"]]
     completed_ids = [result["instance_id"] for result in results if result["success"]]
     resolved_ids = []
@@ -308,6 +375,7 @@ def build_report(entries, results):
         "error_ids": list(sorted(error_ids)),
         "unstopped_containers": list(sorted(unstopped_containers)),
         "unremoved_images": list(sorted(unremoved_images)),
+        "llm_usage": _aggregate_token_usage(pred_dir),
         "schema_version": 2,
     }
 
@@ -415,7 +483,7 @@ def harness(
     print(f"All evaluations completed for model {model_name_or_path}")
 
     # Directly generate report
-    report = build_report(entries, results)
+    report = build_report(entries, results, pred_dir=out_dname)
 
     print(report)
     report_file = output_dir / Path(
