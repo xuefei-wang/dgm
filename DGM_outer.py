@@ -157,11 +157,7 @@ def choose_selfimproves(output_dir, archive, selfimprove_size, method='random', 
         parent_commits = random.choices(commits, probabilities, k=selfimprove_size)
     elif method == 'best':
         # Choose parents with the best score
-        sorted_commits = sorted(
-            candidates,
-            key=lambda x: candidates[x]['accuracy_score'],
-            reverse=True,
-        )
+        sorted_commits = sorted(candidates, key=lambda x: candidates[x]['accuracy_score'])
         parent_commits = sorted_commits[:min(selfimprove_size, len(sorted_commits))]
         if len(parent_commits) < selfimprove_size:
             parent_commits.extend(random.choices(parent_commits, k=selfimprove_size - len(parent_commits)))
