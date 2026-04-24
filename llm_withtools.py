@@ -21,6 +21,14 @@ from tools import load_all_tools
 
 
 def _load_shared_env() -> None:
+    """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
+
+    Mirror of the same fix in ``llm.py`` — see that module for the full
+    explanation. Without the snapshot below, wrapper-exported DGM_*_MODEL
+    values (set by scripts/experiments/run_cross_runner_sweep.sh) would be
+    silently overwritten by the static defaults baked into shared.env or
+    .env.openai, so a Haiku sweep would still call gpt-5.4-mini.
+    """
     path = Path(__file__).resolve()
     repo_root = path.parents[2] if len(path.parents) > 2 else path.parent
     env_paths = [
@@ -29,9 +37,20 @@ def _load_shared_env() -> None:
         repo_root / "configs" / "providers" / ".env.openai",
         repo_root / "configs" / "models" / "shared.env",
     ]
+    authoritative_keys = (
+        "DGM_CLAUDE_MODEL",
+        "DGM_OPENAI_MODEL",
+        "DGM_CODE_MODEL",
+        "DGM_SELF_IMPROVE_MODEL",
+        "DGM_DIAGNOSE_MODEL",
+        "DGM_REASONING_EFFORT",
+    )
+    snapshot = {k: os.environ.get(k) for k in authoritative_keys if os.environ.get(k) is not None}
     for env_path in env_paths:
         if env_path.exists():
             load_dotenv(env_path, override=True)
+    for k, v in snapshot.items():
+        os.environ[k] = v
 
 
 _load_shared_env()

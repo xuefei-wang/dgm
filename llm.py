@@ -46,6 +46,21 @@ AVAILABLE_LLMS = [
 
 
 def _load_shared_env() -> None:
+    """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
+
+    The wrapper at scripts/experiments/run_cross_runner_sweep.sh::configure_model_preset
+    exports DGM_CLAUDE_MODEL / DGM_OPENAI_MODEL / DGM_CODE_MODEL /
+    DGM_SELF_IMPROVE_MODEL / DGM_DIAGNOSE_MODEL / DGM_REASONING_EFFORT
+    BEFORE invoking DGM_outer.py. Without the snapshot below, our subsequent
+    load_dotenv(..., override=True) call would re-read the static defaults
+    in shared.env / .env.openai (e.g. ``DGM_OPENAI_MODEL=gpt-5.4-mini``) and
+    silently overwrite the wrapper's per-sweep choice — so a Haiku sweep
+    would still print "Using OpenAI API with model gpt-5.4-mini" (observed
+    in the audit_3x2_haiku_audit revalidation).
+
+    Snapshot the DGM_* keys (and a few other authoritative wrapper-set
+    overrides) up-front, run the dotenv loaders, then restore.
+    """
     path = Path(__file__).resolve()
     repo_root = path.parents[2] if len(path.parents) > 2 else path.parent
     env_paths = [
@@ -54,9 +69,21 @@ def _load_shared_env() -> None:
         repo_root / "configs" / "providers" / ".env.openai",
         repo_root / "configs" / "models" / "shared.env",
     ]
+    authoritative_keys = (
+        "DGM_CLAUDE_MODEL",
+        "DGM_OPENAI_MODEL",
+        "DGM_CODE_MODEL",
+        "DGM_SELF_IMPROVE_MODEL",
+        "DGM_DIAGNOSE_MODEL",
+        "DGM_REASONING_EFFORT",
+    )
+    snapshot = {k: os.environ.get(k) for k in authoritative_keys if os.environ.get(k) is not None}
     for env_path in env_paths:
         if env_path.exists():
             load_dotenv(env_path, override=True)
+    # Restore wrapper-set overrides on top of whatever the dotenv files set.
+    for k, v in snapshot.items():
+        os.environ[k] = v
 
 
 _load_shared_env()
