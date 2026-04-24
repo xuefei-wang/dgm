@@ -6,8 +6,9 @@ import hashlib
 import json
 import platform
 import re
+import subprocess
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, cast
 
@@ -51,6 +52,7 @@ class TestSpec:
     eval_script_list: list[str]
     env_script_list: list[str]
     arch: str
+    base_commit: str = ""
 
     @property
     def setup_env_script(self):
@@ -85,7 +87,38 @@ class TestSpec:
 
     @property
     def instance_image_key(self):
-        return f"pb.eval.{self.arch}.{self.instance_id}:latest"
+        """Hash the practice-repo state into the image tag so rebuilds of the
+        benchmark's practice repos (which change commit SHAs every time
+        register_git runs with different timestamps) cause cached images to
+        invalidate. Ported from baselines/hyperagents/domains/polyglot/test_spec.py.
+
+        Without this, a stale ``pb.eval.{arch}.{instance_id}:latest`` image
+        can hold an /testbed whose git history no longer contains the
+        ``test_commit`` (or ``base_commit``) recorded in the metadata, which
+        surfaces as ``fatal: Could not parse object <sha>`` exit-128 during
+        the harness's ``git reset --hard {test_commit}``. Observed on
+        rust__wordy in audit_sweep_openai_openai_audit.
+        """
+        hash_object = hashlib.sha256()
+        hash_object.update(self.instance_id.encode("utf-8"))
+        hash_object.update((self.base_commit or "").encode("utf-8"))
+        hash_object.update(self._get_repo_state_key().encode("utf-8"))
+        hash_value = hash_object.hexdigest()[:12]
+        return f"pb.eval.{self.arch}.{self.instance_id}.{hash_value}:latest"
+
+    def _get_repo_state_key(self) -> str:
+        repo_path = Path(self.repo)
+        try:
+            return subprocess.check_output(
+                ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            try:
+                return str(repo_path.stat().st_mtime_ns)
+            except FileNotFoundError:
+                return "missing-repo"
 
     def get_instance_container_name(self, run_id=None):
         if not run_id:
@@ -330,4 +363,5 @@ def make_test_spec(instance: dict) -> TestSpec:
         repo_script_list=repo_script_list,
         eval_script_list=eval_script_list,
         arch=arch,
+        base_commit=base_commit,
     )
