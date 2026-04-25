@@ -32,6 +32,8 @@ DEFAULT_TASK_MAP = REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "sw
 DEFAULT_EVAL_SOURCE = REPO_ROOT / "third_party" / "SWE-bench_Pro-os"
 DEFAULT_SCRIPTS_DIR = DEFAULT_EVAL_SOURCE / "run_scripts"
 DEFAULT_DOCKERHUB_USERNAME = "jefzda"
+DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC = int(os.environ.get("DGM_SWEBENCH_OFFICIAL_EVAL_TIMEOUT_SEC", "3600"))
+DEFAULT_AGENT_TIMEOUT_SEC = int(os.environ.get("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", "1800"))
 AGENT_PIP_INDEX_URL = "https://pypi.org/simple"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -520,7 +522,7 @@ def process_entry(
         chat_history_file_container = f"/dgm/{chat_history_file.name}"
         cmd = [
             "timeout",
-            "32400",
+            str(max(1, DEFAULT_AGENT_TIMEOUT_SEC)),
             agent_python,
             "/dgm/coding_agent.py",
             "--problem_statement",
@@ -538,7 +540,8 @@ def process_entry(
             "--instance_id",
             instance_id,
         ]
-        log_container_output(container.exec_run(cmd, environment=_runtime_env(), workdir="/app"), raise_error=False)
+        agent_result = container.exec_run(cmd, environment=_runtime_env(), workdir="/app")
+        log_container_output(agent_result, raise_error=False)
 
         copy_from_container(container, chat_history_file_container, chat_history_file)
         result = container.exec_run(["find", "/dgm/", "-name", f"{instance_filename}_*.md"], workdir="/")
@@ -554,12 +557,16 @@ def process_entry(
             if patch_content.exit_code == 0:
                 proposed_model_patches.append(patch_content.output.decode("utf-8"))
 
+        agent_exit_code = int(getattr(agent_result, "exit_code", 0) or 0)
+        agent_status = "timeout" if agent_exit_code == 124 else "ok"
         prediction = {
             "instance_id": instance_id,
             "model_name_or_path": model_name_or_path,
             "model_patch": model_patch,
             "proposed_model_patches": proposed_model_patches,
-            "eval_result": "pending_eval" if model_patch.strip() else "empty_patch",
+            "agent_status": agent_status,
+            "agent_exit_code": agent_exit_code,
+            "eval_result": "pending_eval" if model_patch.strip() else ("agent_timeout" if agent_status == "timeout" else "empty_patch"),
             "success": True,
         }
         out_fname.write_text(json.dumps(prediction, indent=4), encoding="utf-8")
@@ -567,6 +574,8 @@ def process_entry(
             "success": True,
             "instance_id": instance_id,
             "model_patch": model_patch,
+            "agent_status": agent_status,
+            "agent_exit_code": agent_exit_code,
             "json_path": str(out_fname),
         }
     except Exception as exc:
@@ -636,7 +645,8 @@ def _run_official_eval(
     use_local_docker: bool,
     docker_platform: str | None,
     block_network: bool,
-) -> None:
+    timeout_sec: int = DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC,
+) -> dict[str, Any]:
     official_eval_dir.mkdir(parents=True, exist_ok=True)
     wrapper = REPO_ROOT / "scripts" / "run_swebench_pro_eval.py"
     if wrapper.exists():
@@ -689,7 +699,31 @@ def _run_official_eval(
             cmd.extend(["--docker_platform", docker_platform])
         if block_network:
             cmd.append("--block_network")
-    subprocess.run(cmd, check=True)
+    timeout_sec = max(1, int(timeout_sec))
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "timeout",
+            "timeout_sec": timeout_sec,
+            "returncode": None,
+            "stdout_tail": (exc.stdout or "")[-2000:],
+            "stderr_tail": (exc.stderr or "")[-2000:],
+        }
+
+    return {
+        "status": "ok" if proc.returncode == 0 else "failed",
+        "timeout_sec": timeout_sec,
+        "returncode": proc.returncode,
+        "stdout_tail": (proc.stdout or "")[-2000:],
+        "stderr_tail": (proc.stderr or "")[-2000:],
+    }
 
 
 def _load_eval_results(official_eval_dir: Path) -> dict[str, bool]:
@@ -729,6 +763,39 @@ def _build_tests_status(output: dict[str, Any], entry: dict[str, Any]) -> dict[s
     }
 
 
+def _is_resolved_from_output(output: dict[str, Any], entry: dict[str, Any]) -> bool:
+    tests = output.get("tests", []) if isinstance(output, dict) else []
+    passed_tests = {
+        str(item.get("name") or "").strip()
+        for item in tests
+        if isinstance(item, dict) and str(item.get("status") or "").strip().upper() == "PASSED"
+    }
+    expected = set(_parse_string_list(entry.get("fail_to_pass") or entry.get("FAIL_TO_PASS")))
+    expected.update(_parse_string_list(entry.get("pass_to_pass") or entry.get("PASS_TO_PASS")))
+    return expected <= passed_tests
+
+
+def _load_partial_eval_results(
+    official_eval_dir: Path,
+    *,
+    prefix: str,
+    entries_by_id: dict[str, dict[str, Any]],
+) -> dict[str, bool]:
+    partial_results: dict[str, bool] = {}
+    for instance_id, entry in entries_by_id.items():
+        output_path = official_eval_dir / instance_id / f"{prefix}_output.json"
+        if not output_path.exists():
+            continue
+        try:
+            loaded = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        partial_results[instance_id] = _is_resolved_from_output(loaded, entry)
+    return partial_results
+
+
 def _eval_log_text(resolved: bool | None, tests_status: dict[str, Any]) -> str:
     lines = [f"Resolved: {resolved}" if resolved is not None else "Resolved: unknown"]
     sections = [
@@ -762,7 +829,9 @@ def _write_eval_logs(
     official_eval_dir: Path,
     prefix: str,
     eval_results: dict[str, bool],
+    eval_metadata: dict[str, Any] | None = None,
 ) -> None:
+    eval_metadata = eval_metadata or {}
     for result in results:
         instance_id = validate_instance_id(result["instance_id"])
         instance_filename = safe_instance_filename(instance_id)
@@ -775,28 +844,57 @@ def _write_eval_logs(
             )
             continue
         if not str(result.get("eval_patch", result.get("model_patch")) or "").strip():
-            _update_prediction(json_path, eval_result="empty_patch")
-            (out_dname / f"{instance_filename}_eval.md").write_text(
-                "Evaluation did not run because the model patch was empty.",
-                encoding="utf-8",
-            )
+            if result.get("agent_status") == "timeout":
+                _update_prediction(json_path, eval_result="agent_timeout")
+                eval_text = (
+                    "Evaluation did not run because prediction generation timed out "
+                    f"after {DEFAULT_AGENT_TIMEOUT_SEC} seconds and no model patch was emitted."
+                )
+            else:
+                _update_prediction(json_path, eval_result="empty_patch")
+                eval_text = "Evaluation did not run because the model patch was empty."
+            (out_dname / f"{instance_filename}_eval.md").write_text(eval_text, encoding="utf-8")
             continue
 
         resolved = eval_results.get(instance_id)
-        eval_result = "resolved" if resolved else "unresolved"
+        output_path = official_eval_dir / instance_id / f"{prefix}_output.json"
+        if resolved is None and eval_metadata.get("status") == "timeout":
+            eval_result = "eval_timeout"
+        elif resolved is None and eval_metadata.get("status") == "failed":
+            eval_result = "eval_error"
+        elif resolved is None and not output_path.exists():
+            eval_result = "eval_incomplete"
+        else:
+            eval_result = "resolved" if resolved else "unresolved"
         _update_prediction(json_path, eval_result=eval_result)
 
-        output_path = official_eval_dir / instance_id / f"{prefix}_output.json"
         output = {}
         if output_path.exists():
             loaded = json.loads(output_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 output = loaded
         tests_status = _build_tests_status(output, entries_by_id[instance_id])
-        (out_dname / f"{instance_filename}_eval.md").write_text(
-            _eval_log_text(resolved, tests_status),
-            encoding="utf-8",
-        )
+        eval_text = _eval_log_text(resolved, tests_status)
+        if eval_result in {"eval_timeout", "eval_error", "eval_incomplete"}:
+            lines = []
+            if eval_result == "eval_timeout":
+                lines.append(
+                    f"Official evaluation timed out after {eval_metadata.get('timeout_sec', 'unknown')} seconds."
+                )
+            elif eval_result == "eval_error":
+                lines.append(
+                    f"Official evaluation failed with return code {eval_metadata.get('returncode', 'unknown')}."
+                )
+            else:
+                lines.append("Official evaluation did not produce an instance result.")
+            stdout_tail = str(eval_metadata.get("stdout_tail") or "").strip()
+            stderr_tail = str(eval_metadata.get("stderr_tail") or "").strip()
+            if stdout_tail:
+                lines.extend(["", "## Evaluator stdout tail", stdout_tail])
+            if stderr_tail:
+                lines.extend(["", "## Evaluator stderr tail", stderr_tail])
+            eval_text = "\n".join(lines) + "\n\n" + eval_text
+        (out_dname / f"{instance_filename}_eval.md").write_text(eval_text, encoding="utf-8")
 
 
 _TOKEN_USAGE_RE = re.compile(r'^TOKEN_USAGE (\{.*\})\s*$', re.MULTILINE)
@@ -859,14 +957,23 @@ def _aggregate_token_usage(out_dname: Path) -> dict[str, Any]:
 def build_report(
     entries: list[dict[str, Any]], results: list[dict[str, Any]], eval_results: dict[str, bool],
     out_dname: Path | None = None,
+    eval_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    eval_metadata = eval_metadata or {}
     submitted_ids = [validate_instance_id(result["instance_id"]) for result in results]
     completed_ids = [validate_instance_id(result["instance_id"]) for result in results if result.get("success")]
     incomplete_ids = [validate_instance_id(result["instance_id"]) for result in results if not result.get("success")]
+    agent_timeout_ids = sorted(
+        validate_instance_id(result["instance_id"])
+        for result in results
+        if result.get("success") and result.get("agent_status") == "timeout"
+    )
     empty_patch_ids = [
         validate_instance_id(result["instance_id"])
         for result in results
-        if result.get("success") and not str(result.get("eval_patch", result.get("model_patch")) or "").strip()
+        if result.get("success")
+        and result.get("agent_status") != "timeout"
+        and not str(result.get("eval_patch", result.get("model_patch")) or "").strip()
     ]
     eval_results = {validate_instance_id(instance_id): resolved for instance_id, resolved in eval_results.items()}
     resolved_ids = sorted(instance_id for instance_id, resolved in eval_results.items() if resolved)
@@ -878,6 +985,12 @@ def build_report(
         and not eval_results.get(validate_instance_id(result["instance_id"]), False)
     )
     error_ids = sorted(set(incomplete_ids))
+    attempted_eval_ids = sorted(
+        validate_instance_id(result["instance_id"])
+        for result in results
+        if result.get("success") and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
+    )
+    eval_incomplete_ids = sorted(instance_id for instance_id in attempted_eval_ids if instance_id not in eval_results)
 
     return {
         "total_instances": len(entries),
@@ -885,20 +998,29 @@ def build_report(
         "completed_instances": len(completed_ids),
         "resolved_instances": len(resolved_ids),
         "unresolved_instances": len(unresolved_ids),
+        "eval_incomplete_instances": len(eval_incomplete_ids),
+        "agent_timeout_instances": len(agent_timeout_ids),
         "empty_patch_instances": len(empty_patch_ids),
         "error_instances": len(error_ids),
         "unstopped_instances": 0,
         "completed_ids": sorted(completed_ids),
         "incomplete_ids": sorted(incomplete_ids),
+        "agent_timeout_ids": sorted(agent_timeout_ids),
         "empty_patch_ids": sorted(empty_patch_ids),
         "submitted_ids": sorted(submitted_ids),
         "resolved_ids": sorted(resolved_ids),
         "unresolved_ids": sorted(unresolved_ids),
+        "eval_incomplete_ids": sorted(eval_incomplete_ids),
         "error_ids": sorted(error_ids),
         "unstopped_containers": [],
         "unremoved_images": [],
         "schema_version": "swebench_pro_v1",
         "llm_usage": _aggregate_token_usage(out_dname) if out_dname is not None else {},
+        "official_eval_status": str(eval_metadata.get("status") or "unknown"),
+        "official_eval_returncode": eval_metadata.get("returncode"),
+        "official_eval_timeout_sec": eval_metadata.get("timeout_sec"),
+        "official_eval_stdout_tail": str(eval_metadata.get("stdout_tail") or ""),
+        "official_eval_stderr_tail": str(eval_metadata.get("stderr_tail") or ""),
     }
 
 
@@ -978,8 +1100,9 @@ def harness(
         patch_payload = _write_patch_bundle(patch_bundle, results, model_name_or_path_inst, entries_by_id)
         official_eval_dir = output_dir / "official_eval" / model_name_or_path_inst
         eval_results: dict[str, bool] = {}
+        eval_metadata: dict[str, Any] = {"status": "skipped", "timeout_sec": DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC}
         if patch_payload:
-            _run_official_eval(
+            eval_metadata = _run_official_eval(
                 patch_bundle=patch_bundle,
                 official_eval_dir=official_eval_dir,
                 dataset_path=dataset_path,
@@ -992,6 +1115,13 @@ def harness(
                 block_network=block_network,
             )
             eval_results = _load_eval_results(official_eval_dir)
+            partial_eval_results = _load_partial_eval_results(
+                official_eval_dir,
+                prefix=model_name_or_path_inst,
+                entries_by_id=entries_by_id,
+            )
+            for instance_id, resolved in partial_eval_results.items():
+                eval_results.setdefault(instance_id, resolved)
 
         _write_eval_logs(
             entries_by_id=entries_by_id,
@@ -1000,8 +1130,9 @@ def harness(
             official_eval_dir=official_eval_dir,
             prefix=model_name_or_path_inst,
             eval_results=eval_results,
+            eval_metadata=eval_metadata,
         )
-        report = build_report(entries, results, eval_results, out_dname=out_dname)
+        report = build_report(entries, results, eval_results, out_dname=out_dname, eval_metadata=eval_metadata)
         report_file = output_dir / f"{model_name_or_path.replace('/', '__')}_{eval_idx}.000.json"
         report_file.write_text(json.dumps(report, indent=4), encoding="utf-8")
         print(f"Report written to {report_file}")
