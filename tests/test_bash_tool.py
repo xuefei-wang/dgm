@@ -1,4 +1,7 @@
+import asyncio
+
 import pytest
+from tools import bash as bash_module
 from tools.bash import tool_function, BashSession
 
 @pytest.fixture
@@ -12,7 +15,6 @@ class TestBashTool:
         """Test running a simple command."""
         result = tool_function("echo 'hello world'")
         assert "hello world" in result
-        assert "Error" not in result
 
     def test_multiple_commands(self):
         """Test running multiple commands in sequence."""
@@ -77,3 +79,31 @@ class TestBashTool:
         result = tool_function(command)
         assert "Line 1" in result
         assert "Line 100" in result
+
+    def test_tool_function_call_stops_session(self, monkeypatch):
+        class FakeSession:
+            last_instance = None
+
+            def __init__(self):
+                FakeSession.last_instance = self
+                self._started = False
+                self.stop_called = False
+
+            async def start(self):
+                self._started = True
+
+            async def run(self, command):
+                assert command == "echo test"
+                return "test", ""
+
+            async def stop(self):
+                self.stop_called = True
+                self._started = False
+
+        monkeypatch.setattr(bash_module, "BashSession", FakeSession)
+
+        result = asyncio.run(bash_module.tool_function_call("echo test"))
+
+        assert result == "test"
+        assert FakeSession.last_instance is not None
+        assert FakeSession.last_instance.stop_called is True

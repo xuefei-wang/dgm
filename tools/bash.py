@@ -47,11 +47,16 @@ class BashSession:
         )
         self._started = True
 
-    def stop(self):
+    async def stop(self):
         if not self._started:
             return
         if self._process.returncode is None:
             self._process.terminate()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                self._process.kill()
+                await self._process.wait()
         self._process = None
         self._started = False
 
@@ -130,9 +135,8 @@ def filter_error(error):
 
 async def tool_function_call(command):
     """Execute a command in the bash shell."""
+    bash_session = BashSession()
     try:
-        bash_session = BashSession()
-
         if not bash_session._started:
             await bash_session.start()
 
@@ -146,6 +150,8 @@ async def tool_function_call(command):
         return result.strip()
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        await bash_session.stop()
 
 def tool_function(command):
     return asyncio.run(tool_function_call(command))
