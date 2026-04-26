@@ -32,8 +32,23 @@ DEFAULT_TASK_MAP = REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "sw
 DEFAULT_EVAL_SOURCE = REPO_ROOT / "third_party" / "SWE-bench_Pro-os"
 DEFAULT_SCRIPTS_DIR = DEFAULT_EVAL_SOURCE / "run_scripts"
 DEFAULT_DOCKERHUB_USERNAME = "jefzda"
-DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC = int(os.environ.get("DGM_SWEBENCH_OFFICIAL_EVAL_TIMEOUT_SEC", "3600"))
-DEFAULT_AGENT_TIMEOUT_SEC = int(os.environ.get("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", "1800"))
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise ValueError(f"Env var {name} must be a positive integer, got {raw!r}")
+    if value <= 0:
+        raise ValueError(f"Env var {name} must be > 0, got {value!r}")
+    return value
+
+
+DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_OFFICIAL_EVAL_TIMEOUT_SEC", 3600)
+DEFAULT_AGENT_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 1800)
 AGENT_PIP_INDEX_URL = "https://pypi.org/simple"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -472,12 +487,19 @@ def process_entry(
     if out_fname.exists():
         with out_fname.open(encoding="utf-8") as handle:
             existing = json.load(handle)
-        return {
+        resumed = {
             "success": bool(existing.get("success", True)),
             "instance_id": instance_id,
             "model_patch": existing.get("model_patch", ""),
             "json_path": str(out_fname),
         }
+        # Propagate agent-timeout signal so _write_eval_logs reaches the same
+        # branch on resume that it would on a fresh run.
+        if "agent_status" in existing:
+            resumed["agent_status"] = existing["agent_status"]
+        if "agent_exit_code" in existing:
+            resumed["agent_exit_code"] = existing["agent_exit_code"]
+        return resumed
 
     client = None
     container = None
@@ -700,6 +722,16 @@ def _run_official_eval(
         if block_network:
             cmd.append("--block_network")
     timeout_sec = max(1, int(timeout_sec))
+
+    # Snapshot containers running before we start so we can identify (and
+    # stop) only the ones this eval invocation spawned if it times out or
+    # fails. The official evaluator launches up to num_workers detached
+    # containers via the docker SDK; subprocess.run's SIGKILL on
+    # TimeoutExpired kills our wrapper but leaves dockerd-managed containers
+    # running, so we have to clean them up explicitly.
+    pre_eval_container_ids = _snapshot_running_container_ids()
+
+    leaked_stopped = 0
     try:
         proc = subprocess.run(
             cmd,
@@ -709,13 +741,26 @@ def _run_official_eval(
             timeout=timeout_sec,
         )
     except subprocess.TimeoutExpired as exc:
+        leaked_stopped = _stop_new_evaluator_containers(
+            dockerhub_username=dockerhub_username,
+            preexisting_ids=pre_eval_container_ids,
+        )
         return {
             "status": "timeout",
             "timeout_sec": timeout_sec,
             "returncode": None,
             "stdout_tail": (exc.stdout or "")[-2000:],
             "stderr_tail": (exc.stderr or "")[-2000:],
+            "leaked_containers_stopped": leaked_stopped,
         }
+
+    if proc.returncode != 0:
+        # Non-zero exit may also leave containers behind if the evaluator
+        # crashed mid-run; same cleanup strategy applies.
+        leaked_stopped = _stop_new_evaluator_containers(
+            dockerhub_username=dockerhub_username,
+            preexisting_ids=pre_eval_container_ids,
+        )
 
     return {
         "status": "ok" if proc.returncode == 0 else "failed",
@@ -723,7 +768,65 @@ def _run_official_eval(
         "returncode": proc.returncode,
         "stdout_tail": (proc.stdout or "")[-2000:],
         "stderr_tail": (proc.stderr or "")[-2000:],
+        "leaked_containers_stopped": leaked_stopped,
     }
+
+
+def _snapshot_running_container_ids() -> set[str]:
+    """Best-effort snapshot of currently-running docker container IDs.
+    Returns an empty set if the docker SDK is unavailable or the daemon is
+    unreachable."""
+    try:
+        import docker
+    except Exception:
+        return set()
+    try:
+        client = docker.from_env()
+        return {c.id for c in client.containers.list() if getattr(c, "id", None)}
+    except Exception:
+        return set()
+
+
+def _stop_new_evaluator_containers(
+    *,
+    dockerhub_username: str,
+    preexisting_ids: set[str],
+) -> int:
+    """Stop any container that (a) is not in `preexisting_ids` and (b) was
+    launched from an image under `dockerhub_username/*`. Best-effort:
+    swallow all errors (docker daemon unavailable, container already gone,
+    image inspection failed) and return the number of containers we
+    successfully stopped."""
+    try:
+        import docker
+    except Exception:
+        return 0
+    try:
+        client = docker.from_env()
+    except Exception:
+        return 0
+    image_prefix = f"{dockerhub_username}/"
+    stopped = 0
+    try:
+        containers = client.containers.list()
+    except Exception:
+        return 0
+    for container in containers:
+        cid = getattr(container, "id", None)
+        if not cid or cid in preexisting_ids:
+            continue
+        try:
+            tags = container.image.tags or []
+        except Exception:
+            continue
+        if not any(tag.startswith(image_prefix) for tag in tags):
+            continue
+        try:
+            container.stop(timeout=10)
+            stopped += 1
+        except Exception:
+            continue
+    return stopped
 
 
 def _load_eval_results(official_eval_dir: Path) -> dict[str, bool]:
@@ -818,7 +921,11 @@ def _eval_log_text(resolved: bool | None, tests_status: dict[str, Any]) -> str:
 def _update_prediction(path: Path, *, eval_result: str) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     data["eval_result"] = eval_result
-    path.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    # Atomic write: prediction JSON is also the resume checkpoint; a SIGKILL
+    # mid-write would corrupt it and break subsequent process_entry resumes.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _write_eval_logs(
@@ -870,7 +977,14 @@ def _write_eval_logs(
 
         output = {}
         if output_path.exists():
-            loaded = json.loads(output_path.read_text(encoding="utf-8"))
+            try:
+                loaded = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                # SIGKILL during the evaluator's non-atomic JSON write can
+                # leave a truncated _output.json. _load_partial_eval_results
+                # already skips these; mirror that here so log writing for
+                # other instances isn't aborted by one bad file.
+                loaded = None
             if isinstance(loaded, dict):
                 output = loaded
         tests_status = _build_tests_status(output, entries_by_id[instance_id])
@@ -963,10 +1077,17 @@ def build_report(
     submitted_ids = [validate_instance_id(result["instance_id"]) for result in results]
     completed_ids = [validate_instance_id(result["instance_id"]) for result in results if result.get("success")]
     incomplete_ids = [validate_instance_id(result["instance_id"]) for result in results if not result.get("success")]
+    # agent_timeout_ids counts instances where the agent was killed for time
+    # AND emitted no usable patch. If the agent timed out mid-run but still
+    # produced a non-empty patch, the instance still goes through official
+    # eval and lands in resolved/unresolved/eval_*_ids — counting it here
+    # too would double-count it against attempted_eval_ids.
     agent_timeout_ids = sorted(
         validate_instance_id(result["instance_id"])
         for result in results
-        if result.get("success") and result.get("agent_status") == "timeout"
+        if result.get("success")
+        and result.get("agent_status") == "timeout"
+        and not str(result.get("eval_patch", result.get("model_patch")) or "").strip()
     )
     empty_patch_ids = [
         validate_instance_id(result["instance_id"])
@@ -977,12 +1098,17 @@ def build_report(
     ]
     eval_results = {validate_instance_id(instance_id): resolved for instance_id, resolved in eval_results.items()}
     resolved_ids = sorted(instance_id for instance_id, resolved in eval_results.items() if resolved)
+    # unresolved means the official grader returned False, NOT "no result". An
+    # instance whose eval timed out / errored / never ran shows up in
+    # eval_incomplete_ids instead — counting it here too inflates the
+    # unresolved tally past completed_instances.
     unresolved_ids = sorted(
         validate_instance_id(result["instance_id"])
         for result in results
         if result.get("success")
         and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
-        and not eval_results.get(validate_instance_id(result["instance_id"]), False)
+        and validate_instance_id(result["instance_id"]) in eval_results
+        and not eval_results[validate_instance_id(result["instance_id"])]
     )
     error_ids = sorted(set(incomplete_ids))
     attempted_eval_ids = sorted(
@@ -1021,6 +1147,7 @@ def build_report(
         "official_eval_timeout_sec": eval_metadata.get("timeout_sec"),
         "official_eval_stdout_tail": str(eval_metadata.get("stdout_tail") or ""),
         "official_eval_stderr_tail": str(eval_metadata.get("stderr_tail") or ""),
+        "official_eval_leaked_containers_stopped": int(eval_metadata.get("leaked_containers_stopped") or 0),
     }
 
 
