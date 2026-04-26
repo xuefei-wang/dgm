@@ -48,7 +48,12 @@ def _env_positive_int(name: str, default: int) -> int:
 
 
 DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_OFFICIAL_EVAL_TIMEOUT_SEC", 3600)
-DEFAULT_AGENT_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 1800)
+# Match upstream DGM's SWE-bench Verified harness, which hardcodes
+# `timeout 32400` (9h) on the agent. Changing this would shorten DGM's
+# per-task budget on Pro vs. published Verified, biasing the comparison.
+# Configurable via env var so devs can tune for iteration; production
+# campaigns should leave it unset.
+DEFAULT_AGENT_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 32400)
 AGENT_PIP_INDEX_URL = "https://pypi.org/simple"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
