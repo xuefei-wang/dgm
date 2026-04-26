@@ -64,18 +64,10 @@ def diff_versus_commit(git_dname, commit):
     result = subprocess.run(diff_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     diff_output = result.stdout.decode()
 
-    # Get list of untracked files. Use -z so paths with non-ASCII chars or
-    # spaces aren't C-style-quoted by git's default core.quotepath=true —
-    # quoted paths would break both the IGNORED_UNTRACKED_DIRS segment check
-    # and the downstream `git diff --no-index` invocation (the path arg
-    # would carry literal quote characters).
-    untracked_files_cmd = ["git", "-C", git_dname, "ls-files", "--others", "--exclude-standard", "-z"]
+    # Get list of untracked files
+    untracked_files_cmd = ["git", "-C", git_dname, "ls-files", "--others", "--exclude-standard"]
     result = subprocess.run(untracked_files_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    untracked_files = [
-        entry.decode("utf-8", errors="replace")
-        for entry in result.stdout.split(b"\0")
-        if entry
-    ]
+    untracked_files = result.stdout.decode().splitlines()
 
     # Generate diffs for untracked files while skipping common runtime/build outputs.
     for file in untracked_files:
