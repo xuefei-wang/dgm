@@ -9,8 +9,11 @@ IGNORED_UNTRACKED_DIRS = {
     ".tox",
     ".venv",
     "node_modules",
-    "target",
-    "appendonlydir",
+    "target",         # Rust cargo / Maven
+    "build",          # CMake (C++), Gradle, generic build outputs
+    "dist",           # JS bundlers, Python sdist/wheel
+    ".gradle",        # Gradle daemon cache
+    "appendonlydir",  # Redis 7 persistence
 }
 
 IGNORED_UNTRACKED_FILES = {
