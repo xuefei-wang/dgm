@@ -32,6 +32,28 @@ DEFAULT_TASK_MAP = REPO_ROOT / "benchmarks" / "swebench_pro" / "task_maps" / "sw
 DEFAULT_EVAL_SOURCE = REPO_ROOT / "third_party" / "SWE-bench_Pro-os"
 DEFAULT_SCRIPTS_DIR = DEFAULT_EVAL_SOURCE / "run_scripts"
 DEFAULT_DOCKERHUB_USERNAME = "jefzda"
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise ValueError(f"Env var {name} must be a positive integer, got {raw!r}")
+    if value <= 0:
+        raise ValueError(f"Env var {name} must be > 0, got {value!r}")
+    return value
+
+
+DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_OFFICIAL_EVAL_TIMEOUT_SEC", 3600)
+# Match upstream DGM's SWE-bench Verified harness, which hardcodes
+# `timeout 32400` (9h) on the agent. Changing this would shorten DGM's
+# per-task budget on Pro vs. published Verified, biasing the comparison.
+# Configurable via env var so devs can tune for iteration; production
+# campaigns should leave it unset.
+DEFAULT_AGENT_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 32400)
 AGENT_PIP_INDEX_URL = "https://pypi.org/simple"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -470,12 +492,19 @@ def process_entry(
     if out_fname.exists():
         with out_fname.open(encoding="utf-8") as handle:
             existing = json.load(handle)
-        return {
+        resumed = {
             "success": bool(existing.get("success", True)),
             "instance_id": instance_id,
             "model_patch": existing.get("model_patch", ""),
             "json_path": str(out_fname),
         }
+        # Propagate agent-timeout signal so _write_eval_logs reaches the same
+        # branch on resume that it would on a fresh run.
+        if "agent_status" in existing:
+            resumed["agent_status"] = existing["agent_status"]
+        if "agent_exit_code" in existing:
+            resumed["agent_exit_code"] = existing["agent_exit_code"]
+        return resumed
 
     client = None
     container = None
@@ -520,7 +549,7 @@ def process_entry(
         chat_history_file_container = f"/dgm/{chat_history_file.name}"
         cmd = [
             "timeout",
-            "32400",
+            str(max(1, DEFAULT_AGENT_TIMEOUT_SEC)),
             agent_python,
             "/dgm/coding_agent.py",
             "--problem_statement",
@@ -538,7 +567,8 @@ def process_entry(
             "--instance_id",
             instance_id,
         ]
-        log_container_output(container.exec_run(cmd, environment=_runtime_env(), workdir="/app"), raise_error=False)
+        agent_result = container.exec_run(cmd, environment=_runtime_env(), workdir="/app")
+        log_container_output(agent_result, raise_error=False)
 
         copy_from_container(container, chat_history_file_container, chat_history_file)
         result = container.exec_run(["find", "/dgm/", "-name", f"{instance_filename}_*.md"], workdir="/")
@@ -554,12 +584,16 @@ def process_entry(
             if patch_content.exit_code == 0:
                 proposed_model_patches.append(patch_content.output.decode("utf-8"))
 
+        agent_exit_code = int(getattr(agent_result, "exit_code", 0) or 0)
+        agent_status = "timeout" if agent_exit_code == 124 else "ok"
         prediction = {
             "instance_id": instance_id,
             "model_name_or_path": model_name_or_path,
             "model_patch": model_patch,
             "proposed_model_patches": proposed_model_patches,
-            "eval_result": "pending_eval" if model_patch.strip() else "empty_patch",
+            "agent_status": agent_status,
+            "agent_exit_code": agent_exit_code,
+            "eval_result": "pending_eval" if model_patch.strip() else ("agent_timeout" if agent_status == "timeout" else "empty_patch"),
             "success": True,
         }
         out_fname.write_text(json.dumps(prediction, indent=4), encoding="utf-8")
@@ -567,6 +601,8 @@ def process_entry(
             "success": True,
             "instance_id": instance_id,
             "model_patch": model_patch,
+            "agent_status": agent_status,
+            "agent_exit_code": agent_exit_code,
             "json_path": str(out_fname),
         }
     except Exception as exc:
@@ -636,7 +672,8 @@ def _run_official_eval(
     use_local_docker: bool,
     docker_platform: str | None,
     block_network: bool,
-) -> None:
+    timeout_sec: int = DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC,
+) -> dict[str, Any]:
     official_eval_dir.mkdir(parents=True, exist_ok=True)
     wrapper = REPO_ROOT / "scripts" / "run_swebench_pro_eval.py"
     if wrapper.exists():
@@ -689,7 +726,112 @@ def _run_official_eval(
             cmd.extend(["--docker_platform", docker_platform])
         if block_network:
             cmd.append("--block_network")
-    subprocess.run(cmd, check=True)
+    timeout_sec = max(1, int(timeout_sec))
+
+    # Snapshot containers running before we start so we can identify (and
+    # stop) only the ones this eval invocation spawned if it times out or
+    # fails. The official evaluator launches up to num_workers detached
+    # containers via the docker SDK; subprocess.run's SIGKILL on
+    # TimeoutExpired kills our wrapper but leaves dockerd-managed containers
+    # running, so we have to clean them up explicitly.
+    pre_eval_container_ids = _snapshot_running_container_ids()
+
+    leaked_stopped = 0
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as exc:
+        leaked_stopped = _stop_new_evaluator_containers(
+            dockerhub_username=dockerhub_username,
+            preexisting_ids=pre_eval_container_ids,
+        )
+        return {
+            "status": "timeout",
+            "timeout_sec": timeout_sec,
+            "returncode": None,
+            "stdout_tail": (exc.stdout or "")[-2000:],
+            "stderr_tail": (exc.stderr or "")[-2000:],
+            "leaked_containers_stopped": leaked_stopped,
+        }
+
+    if proc.returncode != 0:
+        # Non-zero exit may also leave containers behind if the evaluator
+        # crashed mid-run; same cleanup strategy applies.
+        leaked_stopped = _stop_new_evaluator_containers(
+            dockerhub_username=dockerhub_username,
+            preexisting_ids=pre_eval_container_ids,
+        )
+
+    return {
+        "status": "ok" if proc.returncode == 0 else "failed",
+        "timeout_sec": timeout_sec,
+        "returncode": proc.returncode,
+        "stdout_tail": (proc.stdout or "")[-2000:],
+        "stderr_tail": (proc.stderr or "")[-2000:],
+        "leaked_containers_stopped": leaked_stopped,
+    }
+
+
+def _snapshot_running_container_ids() -> set[str]:
+    """Best-effort snapshot of currently-running docker container IDs.
+    Returns an empty set if the docker SDK is unavailable or the daemon is
+    unreachable."""
+    try:
+        import docker
+    except Exception:
+        return set()
+    try:
+        client = docker.from_env()
+        return {c.id for c in client.containers.list() if getattr(c, "id", None)}
+    except Exception:
+        return set()
+
+
+def _stop_new_evaluator_containers(
+    *,
+    dockerhub_username: str,
+    preexisting_ids: set[str],
+) -> int:
+    """Stop any container that (a) is not in `preexisting_ids` and (b) was
+    launched from an image under `dockerhub_username/*`. Best-effort:
+    swallow all errors (docker daemon unavailable, container already gone,
+    image inspection failed) and return the number of containers we
+    successfully stopped."""
+    try:
+        import docker
+    except Exception:
+        return 0
+    try:
+        client = docker.from_env()
+    except Exception:
+        return 0
+    image_prefix = f"{dockerhub_username}/"
+    stopped = 0
+    try:
+        containers = client.containers.list()
+    except Exception:
+        return 0
+    for container in containers:
+        cid = getattr(container, "id", None)
+        if not cid or cid in preexisting_ids:
+            continue
+        try:
+            tags = container.image.tags or []
+        except Exception:
+            continue
+        if not any(tag.startswith(image_prefix) for tag in tags):
+            continue
+        try:
+            container.stop(timeout=10)
+            stopped += 1
+        except Exception:
+            continue
+    return stopped
 
 
 def _load_eval_results(official_eval_dir: Path) -> dict[str, bool]:
@@ -729,6 +871,39 @@ def _build_tests_status(output: dict[str, Any], entry: dict[str, Any]) -> dict[s
     }
 
 
+def _is_resolved_from_output(output: dict[str, Any], entry: dict[str, Any]) -> bool:
+    tests = output.get("tests", []) if isinstance(output, dict) else []
+    passed_tests = {
+        str(item.get("name") or "").strip()
+        for item in tests
+        if isinstance(item, dict) and str(item.get("status") or "").strip().upper() == "PASSED"
+    }
+    expected = set(_parse_string_list(entry.get("fail_to_pass") or entry.get("FAIL_TO_PASS")))
+    expected.update(_parse_string_list(entry.get("pass_to_pass") or entry.get("PASS_TO_PASS")))
+    return expected <= passed_tests
+
+
+def _load_partial_eval_results(
+    official_eval_dir: Path,
+    *,
+    prefix: str,
+    entries_by_id: dict[str, dict[str, Any]],
+) -> dict[str, bool]:
+    partial_results: dict[str, bool] = {}
+    for instance_id, entry in entries_by_id.items():
+        output_path = official_eval_dir / instance_id / f"{prefix}_output.json"
+        if not output_path.exists():
+            continue
+        try:
+            loaded = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loaded, dict):
+            continue
+        partial_results[instance_id] = _is_resolved_from_output(loaded, entry)
+    return partial_results
+
+
 def _eval_log_text(resolved: bool | None, tests_status: dict[str, Any]) -> str:
     lines = [f"Resolved: {resolved}" if resolved is not None else "Resolved: unknown"]
     sections = [
@@ -751,7 +926,11 @@ def _eval_log_text(resolved: bool | None, tests_status: dict[str, Any]) -> str:
 def _update_prediction(path: Path, *, eval_result: str) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     data["eval_result"] = eval_result
-    path.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    # Atomic write: prediction JSON is also the resume checkpoint; a SIGKILL
+    # mid-write would corrupt it and break subsequent process_entry resumes.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _write_eval_logs(
@@ -762,7 +941,9 @@ def _write_eval_logs(
     official_eval_dir: Path,
     prefix: str,
     eval_results: dict[str, bool],
+    eval_metadata: dict[str, Any] | None = None,
 ) -> None:
+    eval_metadata = eval_metadata or {}
     for result in results:
         instance_id = validate_instance_id(result["instance_id"])
         instance_filename = safe_instance_filename(instance_id)
@@ -775,28 +956,64 @@ def _write_eval_logs(
             )
             continue
         if not str(result.get("eval_patch", result.get("model_patch")) or "").strip():
-            _update_prediction(json_path, eval_result="empty_patch")
-            (out_dname / f"{instance_filename}_eval.md").write_text(
-                "Evaluation did not run because the model patch was empty.",
-                encoding="utf-8",
-            )
+            if result.get("agent_status") == "timeout":
+                _update_prediction(json_path, eval_result="agent_timeout")
+                eval_text = (
+                    "Evaluation did not run because prediction generation timed out "
+                    f"after {DEFAULT_AGENT_TIMEOUT_SEC} seconds and no model patch was emitted."
+                )
+            else:
+                _update_prediction(json_path, eval_result="empty_patch")
+                eval_text = "Evaluation did not run because the model patch was empty."
+            (out_dname / f"{instance_filename}_eval.md").write_text(eval_text, encoding="utf-8")
             continue
 
         resolved = eval_results.get(instance_id)
-        eval_result = "resolved" if resolved else "unresolved"
+        output_path = official_eval_dir / instance_id / f"{prefix}_output.json"
+        if resolved is None and eval_metadata.get("status") == "timeout":
+            eval_result = "eval_timeout"
+        elif resolved is None and eval_metadata.get("status") == "failed":
+            eval_result = "eval_error"
+        elif resolved is None and not output_path.exists():
+            eval_result = "eval_incomplete"
+        else:
+            eval_result = "resolved" if resolved else "unresolved"
         _update_prediction(json_path, eval_result=eval_result)
 
-        output_path = official_eval_dir / instance_id / f"{prefix}_output.json"
         output = {}
         if output_path.exists():
-            loaded = json.loads(output_path.read_text(encoding="utf-8"))
+            try:
+                loaded = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                # SIGKILL during the evaluator's non-atomic JSON write can
+                # leave a truncated _output.json. _load_partial_eval_results
+                # already skips these; mirror that here so log writing for
+                # other instances isn't aborted by one bad file.
+                loaded = None
             if isinstance(loaded, dict):
                 output = loaded
         tests_status = _build_tests_status(output, entries_by_id[instance_id])
-        (out_dname / f"{instance_filename}_eval.md").write_text(
-            _eval_log_text(resolved, tests_status),
-            encoding="utf-8",
-        )
+        eval_text = _eval_log_text(resolved, tests_status)
+        if eval_result in {"eval_timeout", "eval_error", "eval_incomplete"}:
+            lines = []
+            if eval_result == "eval_timeout":
+                lines.append(
+                    f"Official evaluation timed out after {eval_metadata.get('timeout_sec', 'unknown')} seconds."
+                )
+            elif eval_result == "eval_error":
+                lines.append(
+                    f"Official evaluation failed with return code {eval_metadata.get('returncode', 'unknown')}."
+                )
+            else:
+                lines.append("Official evaluation did not produce an instance result.")
+            stdout_tail = str(eval_metadata.get("stdout_tail") or "").strip()
+            stderr_tail = str(eval_metadata.get("stderr_tail") or "").strip()
+            if stdout_tail:
+                lines.extend(["", "## Evaluator stdout tail", stdout_tail])
+            if stderr_tail:
+                lines.extend(["", "## Evaluator stderr tail", stderr_tail])
+            eval_text = "\n".join(lines) + "\n\n" + eval_text
+        (out_dname / f"{instance_filename}_eval.md").write_text(eval_text, encoding="utf-8")
 
 
 _TOKEN_USAGE_RE = re.compile(r'^TOKEN_USAGE (\{.*\})\s*$', re.MULTILINE)
@@ -859,25 +1076,52 @@ def _aggregate_token_usage(out_dname: Path) -> dict[str, Any]:
 def build_report(
     entries: list[dict[str, Any]], results: list[dict[str, Any]], eval_results: dict[str, bool],
     out_dname: Path | None = None,
+    eval_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    eval_metadata = eval_metadata or {}
     submitted_ids = [validate_instance_id(result["instance_id"]) for result in results]
     completed_ids = [validate_instance_id(result["instance_id"]) for result in results if result.get("success")]
     incomplete_ids = [validate_instance_id(result["instance_id"]) for result in results if not result.get("success")]
+    # agent_timeout_ids counts instances where the agent was killed for time
+    # AND emitted no usable patch. If the agent timed out mid-run but still
+    # produced a non-empty patch, the instance still goes through official
+    # eval and lands in resolved/unresolved/eval_*_ids — counting it here
+    # too would double-count it against attempted_eval_ids.
+    agent_timeout_ids = sorted(
+        validate_instance_id(result["instance_id"])
+        for result in results
+        if result.get("success")
+        and result.get("agent_status") == "timeout"
+        and not str(result.get("eval_patch", result.get("model_patch")) or "").strip()
+    )
     empty_patch_ids = [
         validate_instance_id(result["instance_id"])
         for result in results
-        if result.get("success") and not str(result.get("eval_patch", result.get("model_patch")) or "").strip()
+        if result.get("success")
+        and result.get("agent_status") != "timeout"
+        and not str(result.get("eval_patch", result.get("model_patch")) or "").strip()
     ]
     eval_results = {validate_instance_id(instance_id): resolved for instance_id, resolved in eval_results.items()}
     resolved_ids = sorted(instance_id for instance_id, resolved in eval_results.items() if resolved)
+    # unresolved means the official grader returned False, NOT "no result". An
+    # instance whose eval timed out / errored / never ran shows up in
+    # eval_incomplete_ids instead — counting it here too inflates the
+    # unresolved tally past completed_instances.
     unresolved_ids = sorted(
         validate_instance_id(result["instance_id"])
         for result in results
         if result.get("success")
         and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
-        and not eval_results.get(validate_instance_id(result["instance_id"]), False)
+        and validate_instance_id(result["instance_id"]) in eval_results
+        and not eval_results[validate_instance_id(result["instance_id"])]
     )
     error_ids = sorted(set(incomplete_ids))
+    attempted_eval_ids = sorted(
+        validate_instance_id(result["instance_id"])
+        for result in results
+        if result.get("success") and str(result.get("eval_patch", result.get("model_patch")) or "").strip()
+    )
+    eval_incomplete_ids = sorted(instance_id for instance_id in attempted_eval_ids if instance_id not in eval_results)
 
     return {
         "total_instances": len(entries),
@@ -885,20 +1129,30 @@ def build_report(
         "completed_instances": len(completed_ids),
         "resolved_instances": len(resolved_ids),
         "unresolved_instances": len(unresolved_ids),
+        "eval_incomplete_instances": len(eval_incomplete_ids),
+        "agent_timeout_instances": len(agent_timeout_ids),
         "empty_patch_instances": len(empty_patch_ids),
         "error_instances": len(error_ids),
         "unstopped_instances": 0,
         "completed_ids": sorted(completed_ids),
         "incomplete_ids": sorted(incomplete_ids),
+        "agent_timeout_ids": sorted(agent_timeout_ids),
         "empty_patch_ids": sorted(empty_patch_ids),
         "submitted_ids": sorted(submitted_ids),
         "resolved_ids": sorted(resolved_ids),
         "unresolved_ids": sorted(unresolved_ids),
+        "eval_incomplete_ids": sorted(eval_incomplete_ids),
         "error_ids": sorted(error_ids),
         "unstopped_containers": [],
         "unremoved_images": [],
         "schema_version": "swebench_pro_v1",
         "llm_usage": _aggregate_token_usage(out_dname) if out_dname is not None else {},
+        "official_eval_status": str(eval_metadata.get("status") or "unknown"),
+        "official_eval_returncode": eval_metadata.get("returncode"),
+        "official_eval_timeout_sec": eval_metadata.get("timeout_sec"),
+        "official_eval_stdout_tail": str(eval_metadata.get("stdout_tail") or ""),
+        "official_eval_stderr_tail": str(eval_metadata.get("stderr_tail") or ""),
+        "official_eval_leaked_containers_stopped": int(eval_metadata.get("leaked_containers_stopped") or 0),
     }
 
 
@@ -978,8 +1232,9 @@ def harness(
         patch_payload = _write_patch_bundle(patch_bundle, results, model_name_or_path_inst, entries_by_id)
         official_eval_dir = output_dir / "official_eval" / model_name_or_path_inst
         eval_results: dict[str, bool] = {}
+        eval_metadata: dict[str, Any] = {"status": "skipped", "timeout_sec": DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC}
         if patch_payload:
-            _run_official_eval(
+            eval_metadata = _run_official_eval(
                 patch_bundle=patch_bundle,
                 official_eval_dir=official_eval_dir,
                 dataset_path=dataset_path,
@@ -992,6 +1247,13 @@ def harness(
                 block_network=block_network,
             )
             eval_results = _load_eval_results(official_eval_dir)
+            partial_eval_results = _load_partial_eval_results(
+                official_eval_dir,
+                prefix=model_name_or_path_inst,
+                entries_by_id=entries_by_id,
+            )
+            for instance_id, resolved in partial_eval_results.items():
+                eval_results.setdefault(instance_id, resolved)
 
         _write_eval_logs(
             entries_by_id=entries_by_id,
@@ -1000,8 +1262,9 @@ def harness(
             official_eval_dir=official_eval_dir,
             prefix=model_name_or_path_inst,
             eval_results=eval_results,
+            eval_metadata=eval_metadata,
         )
-        report = build_report(entries, results, eval_results, out_dname=out_dname)
+        report = build_report(entries, results, eval_results, out_dname=out_dname, eval_metadata=eval_metadata)
         report_file = output_dir / f"{model_name_or_path.replace('/', '__')}_{eval_idx}.000.json"
         report_file.write_text(json.dumps(report, indent=4), encoding="utf-8")
         print(f"Report written to {report_file}")
