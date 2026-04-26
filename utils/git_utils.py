@@ -52,7 +52,6 @@ def diff_versus_commit(git_dname, commit):
     # Generate diffs for untracked files
     for file in untracked_files:
         # Diff untracked file against /dev/null (empty file)
-        file_path = os.path.join(git_dname, file)
         devnull = '/dev/null'
         if os.name == 'nt':  # Handle Windows
             devnull = 'NUL'

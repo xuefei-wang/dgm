@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 
 def tool_info():
     return {
@@ -47,13 +48,31 @@ class BashSession:
         )
         self._started = True
 
-    def stop(self):
+    async def stop(self):
         if not self._started:
             return
-        if self._process.returncode is None:
-            self._process.terminate()
+        if self._process is not None and self._process.returncode is None:
+            # start() puts bash in its own session via os.setsid; tear down the
+            # whole process group so backgrounded children (e.g. `sleep 10 &`)
+            # don't outlive the bash leader.
+            self._signal_process_group(signal.SIGTERM)
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                self._signal_process_group(signal.SIGKILL)
+                await self._process.wait()
         self._process = None
         self._started = False
+
+    def _signal_process_group(self, sig):
+        try:
+            pgid = os.getpgid(self._process.pid)
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass
 
     async def run(self, command):
         if not self._started:
@@ -130,9 +149,8 @@ def filter_error(error):
 
 async def tool_function_call(command):
     """Execute a command in the bash shell."""
+    bash_session = BashSession()
     try:
-        bash_session = BashSession()
-
         if not bash_session._started:
             await bash_session.start()
 
@@ -146,6 +164,8 @@ async def tool_function_call(command):
         return result.strip()
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        await bash_session.stop()
 
 def tool_function(command):
     return asyncio.run(tool_function_call(command))
