@@ -1,26 +1,6 @@
 import os
 import subprocess
 
-IGNORED_UNTRACKED_DIRS = {
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    ".venv",
-    "node_modules",
-    "target",         # Rust cargo / Maven
-    "build",          # CMake (C++), Gradle, generic build outputs
-    "dist",           # JS bundlers, Python sdist/wheel
-    ".gradle",        # Gradle daemon cache
-    "appendonlydir",  # Redis 7 persistence
-}
-
-IGNORED_UNTRACKED_FILES = {
-    "Cargo.lock",
-    "dump.rdb",
-}
-
 
 def get_git_commit_hash(repo_path='.'):
     result = subprocess.run(
@@ -69,14 +49,8 @@ def diff_versus_commit(git_dname, commit):
     result = subprocess.run(untracked_files_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     untracked_files = result.stdout.decode().splitlines()
 
-    # Generate diffs for untracked files while skipping common runtime/build outputs.
+    # Generate diffs for untracked files
     for file in untracked_files:
-        parts = file.split("/")
-        if any(part in IGNORED_UNTRACKED_DIRS for part in parts[:-1]):
-            continue
-        if parts and parts[-1] in IGNORED_UNTRACKED_FILES:
-            continue
-
         # Diff untracked file against /dev/null (empty file)
         devnull = '/dev/null'
         if os.name == 'nt':  # Handle Windows
