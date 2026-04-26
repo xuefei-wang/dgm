@@ -80,6 +80,55 @@ class TestBashTool:
         assert "Line 1" in result
         assert "Line 100" in result
 
+    def test_real_session_stop_kills_process_group(self):
+        """Regression guard for the actual subprocess teardown: stop()
+        must reap not just the bash leader but also any backgrounded
+        children (per the tool docstring inviting `sleep 30 &`). This
+        complements the FakeSession test below — that one cannot detect
+        process-group leaks because it bypasses the OS entirely."""
+        import os
+        import signal
+
+        async def _exercise():
+            session = bash_module.BashSession()
+            await session.start()
+            bash_pid = session._process.pid
+            # Spawn a long-running child INSIDE the bash session and capture
+            # its PID. Without process-group cleanup in stop(), this child
+            # would be reparented to init and survive past stop().
+            output, _ = await session.run("sleep 30 & echo $!")
+            try:
+                child_pid = int(output.strip().splitlines()[-1])
+            except (ValueError, IndexError) as exc:
+                raise AssertionError(f"could not parse child PID from {output!r}") from exc
+
+            assert os.path.exists(f"/proc/{bash_pid}"), "bash leader should be alive before stop"
+            assert os.path.exists(f"/proc/{child_pid}"), "child should be alive before stop"
+
+            await session.stop()
+
+            # Give the OS a brief moment to deliver the signal and reap.
+            for _ in range(20):
+                if not os.path.exists(f"/proc/{child_pid}"):
+                    break
+                await asyncio.sleep(0.05)
+
+            assert not os.path.exists(f"/proc/{bash_pid}"), "bash leader leaked past stop()"
+            child_alive = os.path.exists(f"/proc/{child_pid}")
+            if child_alive:
+                # Be a good citizen: clean up the leak so it doesn't pollute
+                # the test runner.
+                try:
+                    os.kill(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                raise AssertionError(
+                    f"backgrounded child {child_pid} survived stop() — "
+                    "process-group cleanup regression"
+                )
+
+        asyncio.run(_exercise())
+
     def test_tool_function_call_stops_session(self, monkeypatch):
         class FakeSession:
             last_instance = None
