@@ -29,6 +29,15 @@ from swe_bench.utils import (
 
 
 def _load_shared_env() -> None:
+    """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
+
+    Wrapper scripts export DGM_CLAUDE_MODEL / DGM_OPENAI_MODEL / DGM_CODE_MODEL /
+    DGM_SELF_IMPROVE_MODEL / DGM_DIAGNOSE_MODEL / DGM_REASONING_EFFORT before
+    invoking DGM. Without this snapshot, the subsequent load_dotenv(..., override=True)
+    would re-read the static defaults in shared.env / .env.openai (e.g.
+    DGM_OPENAI_MODEL=gpt-5.4-mini) and silently overwrite the wrapper's per-sweep
+    choice. See llm.py for the original PR #501 fix that this mirrors.
+    """
     repo_root = Path(__file__).resolve().parents[3]
     env_paths = [
         repo_root / "configs" / "providers" / ".env.shared",
@@ -36,9 +45,20 @@ def _load_shared_env() -> None:
         repo_root / "configs" / "providers" / ".env.openai",
         repo_root / "configs" / "models" / "shared.env",
     ]
+    authoritative_keys = (
+        "DGM_CLAUDE_MODEL",
+        "DGM_OPENAI_MODEL",
+        "DGM_CODE_MODEL",
+        "DGM_SELF_IMPROVE_MODEL",
+        "DGM_DIAGNOSE_MODEL",
+        "DGM_REASONING_EFFORT",
+    )
+    snapshot = {k: os.environ.get(k) for k in authoritative_keys if os.environ.get(k) is not None}
     for env_path in env_paths:
         if env_path.exists():
             load_dotenv(env_path, override=True)
+    for k, v in snapshot.items():
+        os.environ[k] = v
 
 
 def _collect_runtime_env(names):
