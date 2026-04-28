@@ -303,9 +303,9 @@ def main():
         type=str,
         default=os.getenv(
             "DGM_POLYGLOT_SMALL_SUBSET",
-            "../../benchmarks/polyglot/task_maps/polyglot_medium_50_seed0_ids.json",
+            "./polyglot/subsets/small.json",
         ),
-        help="Polyglot first-stage subset JSON. Override to reuse prepared benchmark task maps.",
+        help="Polyglot first-stage subset JSON. Default matches upstream's 10-task small.json so staged eval is not collapsed when --shallow_eval is not set. Override to reuse prepared benchmark task maps.",
     )
     parser.add_argument(
         "--polyglot_medium_subset",
