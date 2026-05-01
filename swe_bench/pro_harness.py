@@ -410,18 +410,79 @@ def _setup_agent_python(container, python_bin: str) -> str:
     from swe_bench.utils import log_container_output
 
     venv_install_cmd = _agent_pip_install_command("/dgm/.venv/bin/python", break_system_packages=False)
-    system_install_cmd = _agent_pip_install_command(python_bin, break_system_packages=True)
 
-    result = container.exec_run([python_bin, "-m", "venv", "/dgm/.venv"], workdir="/")
+    def _create_venv_and_install(py_bin: str) -> bool:
+        venv_result = container.exec_run([py_bin, "-m", "venv", "/dgm/.venv"], workdir="/")
+        log_container_output(venv_result, raise_error=False)
+        if venv_result.exit_code != 0:
+            return False
+        install_result = container.exec_run(["/bin/bash", "-lc", venv_install_cmd], workdir="/")
+        log_container_output(install_result, raise_error=False)
+        if install_result.exit_code == 0:
+            return True
+        log_container_output(container.exec_run(["rm", "-rf", "/dgm/.venv"], workdir="/"), raise_error=False)
+        return False
+
+    # Probe the container's Python minor version. DGM source uses PEP 604
+    # union syntax (`str | None`) which requires Python 3.10+; on older
+    # base images we must provision a newer interpreter before any DGM
+    # module can even import.
+    container_minor = -1
+    version_probe = container.exec_run(
+        [python_bin, "-c", "import sys; print(sys.version_info[1])"], workdir="/"
+    )
+    if version_probe.exit_code == 0:
+        try:
+            container_minor = int(version_probe.output.decode("utf-8", errors="ignore").strip())
+        except (ValueError, AttributeError):
+            container_minor = -1
+
+    # Strategy 0: container Python is too old for DGM (< 3.10). Bring the
+    # runtime in line with newer SWE-bench Pro images (which ship Python
+    # 3.11 by default) by downloading uv-managed Python 3.11.
+    if 0 <= container_minor < 10:
+        bootstrap_uv = (
+            "set -e && "
+            "curl -LsSf https://astral.sh/uv/install.sh "
+            "| env UV_INSTALL_DIR=/root/.local/bin sh -s -- --quiet && "
+            "/root/.local/bin/uv python install 3.11 && "
+            "PY=$(/root/.local/bin/uv python find 3.11) && "
+            'ln -sf "$PY" /usr/local/bin/python3.11-dgm'
+        )
+        bootstrap_result = container.exec_run(["/bin/bash", "-lc", bootstrap_uv], workdir="/")
+        log_container_output(bootstrap_result, raise_error=False)
+        if bootstrap_result.exit_code == 0 and _create_venv_and_install("/usr/local/bin/python3.11-dgm"):
+            return "/dgm/.venv/bin/python"
+
+    # Strategy 1: native python3 -m venv (works when python3-venv is installed).
+    if _create_venv_and_install(python_bin):
+        return "/dgm/.venv/bin/python"
+
+    # Strategy 1b: some SWE-bench Pro base images ship without `python3-venv`
+    # (no `ensurepip`). Try to install it via apt and retry. If apt is
+    # unavailable or the bootstrap fails we fall through to the system-pip
+    # strategies below.
+    bootstrap_cmd = (
+        "apt-get install -y -qq python3-venv python3-pip "
+        "|| (apt-get update -qq && apt-get install -y -qq python3-venv python3-pip)"
+    )
+    bootstrap_result = container.exec_run(["/bin/bash", "-lc", bootstrap_cmd], workdir="/")
+    log_container_output(bootstrap_result, raise_error=False)
+    if bootstrap_result.exit_code == 0 and _create_venv_and_install(python_bin):
+        return "/dgm/.venv/bin/python"
+
+    # Strategy 2: system pip with --break-system-packages (pip >= 23, PEP 668).
+    system_install_cmd = _agent_pip_install_command(python_bin, break_system_packages=True)
+    result = container.exec_run(["/bin/bash", "-lc", system_install_cmd], workdir="/")
     log_container_output(result, raise_error=False)
     if result.exit_code == 0:
-        result = container.exec_run(["/bin/bash", "-lc", venv_install_cmd], workdir="/")
-        log_container_output(result, raise_error=False)
-        if result.exit_code == 0:
-            return "/dgm/.venv/bin/python"
-        log_container_output(container.exec_run(["rm", "-rf", "/dgm/.venv"], workdir="/"), raise_error=False)
+        return python_bin
 
-    result = container.exec_run(["/bin/bash", "-lc", system_install_cmd], workdir="/")
+    # Strategy 3: legacy system pip without the flag. pip < 23 rejects
+    # --break-system-packages as an unknown option AND does not enforce PEP
+    # 668, so a bare `pip install` is the correct path on those images.
+    legacy_install_cmd = _agent_pip_install_command(python_bin, break_system_packages=False)
+    result = container.exec_run(["/bin/bash", "-lc", legacy_install_cmd], workdir="/")
     log_container_output(result)
     return python_bin
 
