@@ -48,12 +48,37 @@ def _env_positive_int(name: str, default: int) -> int:
 
 
 DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_OFFICIAL_EVAL_TIMEOUT_SEC", 3600)
+
+
+def _cross_runner_agent_timeout_sec() -> int:
+    """Return the agent timeout, checking CROSS_RUNNER_AGENT_TIMEOUT_SEC first.
+
+    CROSS_RUNNER_AGENT_TIMEOUT_SEC (sweep-level override across all runners)
+    is checked first so sweep scripts can set a single unified timeout without
+    touching DGM-specific env vars.  Falls through to DGM_SWEBENCH_AGENT_TIMEOUT_SEC
+    and then to the legacy 32400s default when the cross-runner var is absent,
+    empty, or non-positive (treated as "use DGM default").
+    """
+    cross_raw = os.environ.get("CROSS_RUNNER_AGENT_TIMEOUT_SEC", "").strip()
+    if cross_raw:
+        try:
+            cross_val = int(cross_raw)
+        except ValueError:
+            cross_val = 0
+        if cross_val > 0:
+            return cross_val
+    # Fall through to DGM-specific var or legacy default.
+    return _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 32400)
+
+
 # Match upstream DGM's SWE-bench Verified harness, which hardcodes
 # `timeout 32400` (9h) on the agent. Changing this would shorten DGM's
 # per-task budget on Pro vs. published Verified, biasing the comparison.
-# Configurable via env var so devs can tune for iteration; production
-# campaigns should leave it unset.
-DEFAULT_AGENT_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 32400)
+# Configurable via DGM_SWEBENCH_AGENT_TIMEOUT_SEC (DGM-specific) or
+# CROSS_RUNNER_AGENT_TIMEOUT_SEC (sweep-level override across all runners);
+# the cross-runner var is checked first so sweep scripts can set a single
+# unified timeout without touching DGM-specific env vars.
+DEFAULT_AGENT_TIMEOUT_SEC = _cross_runner_agent_timeout_sec()
 AGENT_PIP_INDEX_URL = "https://pypi.org/simple"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -140,6 +165,8 @@ def _runtime_env() -> dict[str, str]:
             "DGM_REASONING_EFFORT",
             "OPENAI_REASONING_EFFORT",
             "REASONING_EFFORT",
+            "DGM_TEMPERATURE",
+            "CROSS_RUNNER_AGENT_TIMEOUT_SEC",
         ]
     )
 
