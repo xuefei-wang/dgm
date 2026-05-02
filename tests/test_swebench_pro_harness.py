@@ -594,3 +594,124 @@ def test_env_positive_int_rejects_invalid(monkeypatch) -> None:
 
     monkeypatch.setenv("DGM_TEST_VAR", "  900  ")
     assert module._env_positive_int("DGM_TEST_VAR", 42) == 900
+
+
+_PRO_ENTRY_WITH_TESTS = {
+    "instance_id": "instance_pro_strict_demo",
+    "base_commit": "deadbeef",
+    "selected_test_files_to_run": "['tests/test_widget.py', 'tests/test_api.py']",
+    "before_repo_set_cmd": "git checkout abc123 -- tests/test_widget.py tests/test_api.py",
+}
+
+
+def test_seed_tests_helper_defaults_off(monkeypatch) -> None:
+    monkeypatch.delenv("SWARMS_SWEBENCH_PRO_SEED_TESTS", raising=False)
+    assert module._seed_tests_enabled() is False
+    for value in ("1", "true", "TRUE", "yes", "  Yes  "):
+        monkeypatch.setenv("SWARMS_SWEBENCH_PRO_SEED_TESTS", value)
+        assert module._seed_tests_enabled() is True, value
+    for value in ("0", "false", "no", ""):
+        monkeypatch.setenv("SWARMS_SWEBENCH_PRO_SEED_TESTS", value)
+        assert module._seed_tests_enabled() is False, value
+
+
+def test_build_test_description_upstream_strict_no_test_names(monkeypatch) -> None:
+    monkeypatch.delenv("SWARMS_SWEBENCH_PRO_SEED_TESTS", raising=False)
+    text = module._build_test_description(_PRO_ENTRY_WITH_TESTS)
+    # No specific test file names in upstream-strict mode.
+    assert "tests/test_widget.py" not in text
+    assert "tests/test_api.py" not in text
+    # No grader script path or run command in upstream-strict mode.
+    assert "run_script.sh" not in text
+    # The agent must still know the grader will run hidden tests.
+    assert "hidden" in text.lower()
+    # Anonymized count is fine to surface (matches swarms PR #586 leak A fix).
+    assert "2" in text
+    # Anti-test-mod guidance preserved.
+    assert "Do not solve the issue by modifying tests" in text
+
+
+def test_build_test_description_seeded_includes_test_names(monkeypatch) -> None:
+    monkeypatch.setenv("SWARMS_SWEBENCH_PRO_SEED_TESTS", "1")
+    text = module._build_test_description(_PRO_ENTRY_WITH_TESTS)
+    assert "tests/test_widget.py" in text
+    assert "tests/test_api.py" in text
+    assert "run_script.sh" in text
+
+
+class _RecordingContainer:
+    def __init__(self) -> None:
+        self.exec_calls: list = []
+
+    def exec_run(self, cmd, **kwargs):
+        self.exec_calls.append((cmd, kwargs))
+
+        class _Result:
+            exit_code = 0
+            output = b""
+
+        return _Result()
+
+
+def _install_fake_swe_bench_utils(monkeypatch, copied: list) -> None:
+    """Install a fake ``swe_bench.utils`` so the test does not need ``docker``.
+
+    ``_copy_dgm_runtime`` does ``from swe_bench.utils import copy_to_container``
+    inside the function body, so swapping the module in ``sys.modules`` is
+    enough to intercept the import.
+    """
+    import sys
+    from types import ModuleType
+
+    fake_utils = ModuleType("swe_bench.utils")
+
+    def fake_copy_to_container(_container, source, dest):
+        copied.append((Path(str(source)), dest))
+
+    fake_utils.copy_to_container = fake_copy_to_container
+    fake_utils.log_container_output = lambda *_args, **_kwargs: None
+    fake_utils.safe_log = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "swe_bench.utils", fake_utils)
+
+
+def test_copy_dgm_runtime_skips_grader_scripts_in_strict_mode(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("SWARMS_SWEBENCH_PRO_SEED_TESTS", raising=False)
+
+    instance_id = "instance_pro_strict_demo"
+    scripts_dir = tmp_path / "scripts"
+    instance_subdir = scripts_dir / module.safe_instance_filename(instance_id)
+    instance_subdir.mkdir(parents=True)
+    (instance_subdir / "run_script.sh").write_text("#!/bin/bash\npytest tests/test_widget.py\n")
+    (instance_subdir / "parser.py").write_text("# parser\n")
+
+    copied: list = []
+    _install_fake_swe_bench_utils(monkeypatch, copied)
+
+    container = _RecordingContainer()
+    module._copy_dgm_runtime(container, scripts_dir, instance_id)
+
+    dest_paths = [dest for _, dest in copied]
+    assert "/workspace/run_script.sh" not in dest_paths
+    assert "/workspace/parser.py" not in dest_paths
+    assert any(dest.startswith("/dgm/") for dest in dest_paths)
+
+
+def test_copy_dgm_runtime_seeds_grader_scripts_when_flag_on(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SWARMS_SWEBENCH_PRO_SEED_TESTS", "1")
+
+    instance_id = "instance_pro_strict_demo"
+    scripts_dir = tmp_path / "scripts"
+    instance_subdir = scripts_dir / module.safe_instance_filename(instance_id)
+    instance_subdir.mkdir(parents=True)
+    (instance_subdir / "run_script.sh").write_text("#!/bin/bash\npytest tests/test_widget.py\n")
+    (instance_subdir / "parser.py").write_text("# parser\n")
+
+    copied: list = []
+    _install_fake_swe_bench_utils(monkeypatch, copied)
+
+    container = _RecordingContainer()
+    module._copy_dgm_runtime(container, scripts_dir, instance_id)
+
+    dest_paths = [dest for _, dest in copied]
+    assert "/workspace/run_script.sh" in dest_paths
+    assert "/workspace/parser.py" in dest_paths

@@ -349,17 +349,52 @@ def _build_problem_statement(entry: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part is not None).strip()
 
 
+def _seed_tests_enabled() -> bool:
+    """Whether SWARMS_SWEBENCH_PRO_SEED_TESTS is truthy.
+
+    When False (default), the bridge runs in upstream-strict mode:
+    no grader scripts are copied into the agent container and the agent
+    prompt does not name specific test files. See
+    ``benchmarks/swebench_pro/evaluator/swe_bench_pro_eval.py:create_entryscript``
+    for the upstream contract.
+    """
+    return os.environ.get("SWARMS_SWEBENCH_PRO_SEED_TESTS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _build_test_description(entry: dict[str, Any]) -> str:
     selected_files = _parse_string_list(entry.get("selected_test_files_to_run"))
-    lines = [
-        "SWE-bench Pro evaluates this repository with the official per-instance Docker image.",
-        "When the official test script is available in this container, run it with:",
-        "`cd /app && bash /workspace/run_script.sh <specific test files>`.",
-        "Use the given command shape exactly; omit <specific test files> to run the full script.",
-    ]
-    if selected_files:
-        lines.append("Selected test files for this issue:")
-        lines.extend(f"- {path}" for path in selected_files)
+    seed_tests = _seed_tests_enabled()
+    if seed_tests:
+        lines = [
+            "SWE-bench Pro evaluates this repository with the official per-instance Docker image.",
+            "When the official test script is available in this container, run it with:",
+            "`cd /app && bash /workspace/run_script.sh <specific test files>`.",
+            "Use the given command shape exactly; omit <specific test files> to run the full script.",
+        ]
+        if selected_files:
+            lines.append("Selected test files for this issue:")
+            lines.extend(f"- {path}" for path in selected_files)
+    else:
+        # Upstream-strict: do not name test files or expose the grader
+        # script path. The agent infers relevant tests from the issue
+        # description and the repository structure, mirroring the
+        # upstream SWE-bench Pro reference protocol.
+        count_hint = (
+            f"There are {len(selected_files)} hidden test file(s) the grader will run after your patch is applied."
+            if selected_files
+            else "The grader will run a hidden set of tests after your patch is applied."
+        )
+        lines = [
+            "SWE-bench Pro evaluates this repository with a hidden per-instance test script.",
+            count_hint,
+            "Test files and the grader script are not visible inside this container.",
+            "Infer which tests are relevant from the issue description, the requirements, and the repository structure.",
+            "Run the project's own existing test commands (e.g. pytest) to validate your changes locally.",
+        ]
     lines.append("Do not solve the issue by modifying tests; make the minimal source change.")
     return "\n".join(lines)
 
@@ -446,13 +481,19 @@ def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
         dest = f"/dgm/{relative}"
         copy_to_container(container, source, dest)
 
-    run_script = scripts_dir / instance_dirname / "run_script.sh"
-    parser_script = scripts_dir / instance_dirname / "parser.py"
-    if run_script.exists():
-        copy_to_container(container, run_script, "/workspace/run_script.sh")
-        container.exec_run("chmod +x /workspace/run_script.sh", workdir="/")
-    if parser_script.exists():
-        copy_to_container(container, parser_script, "/workspace/parser.py")
+    # Upstream-strict: do not seed the grader's run_script.sh / parser.py
+    # into the agent's /workspace.  These scripts contain the exact test
+    # names from the eval harness; the agent could ``cat`` them and target
+    # only those tests.  Gated on the same flag as ``before_repo_set_cmd``
+    # in ``_prepare_app_repo`` so a single switch flips the whole bridge.
+    if _seed_tests_enabled():
+        run_script = scripts_dir / instance_dirname / "run_script.sh"
+        parser_script = scripts_dir / instance_dirname / "parser.py"
+        if run_script.exists():
+            copy_to_container(container, run_script, "/workspace/run_script.sh")
+            container.exec_run("chmod +x /workspace/run_script.sh", workdir="/")
+        if parser_script.exists():
+            copy_to_container(container, parser_script, "/workspace/parser.py")
 
 
 def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
@@ -481,12 +522,7 @@ def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
     )
     log_container_output(container.exec_run(["/bin/bash", "-lc", setup], workdir="/"))
 
-    seed_tests = os.environ.get("SWARMS_SWEBENCH_PRO_SEED_TESTS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-    if seed_tests:
+    if _seed_tests_enabled():
         before_cmd = _last_before_repo_set_cmd(entry)
         if before_cmd:
             log_container_output(container.exec_run(["/bin/bash", "-lc", before_cmd], workdir="/app"))
