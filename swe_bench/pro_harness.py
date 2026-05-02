@@ -456,6 +456,20 @@ def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
 
 
 def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
+    """Prepare /app to base_commit; optionally seed grader test files.
+
+    The optional ``before_repo_set_cmd`` step (cherry-picking the
+    grader's test files into the agent repo) is gated on
+    ``SWARMS_SWEBENCH_PRO_SEED_TESTS`` (default off = upstream-strict).
+
+    The upstream SWE-bench Pro reference protocol runs
+    ``before_repo_set_cmd`` only inside the grader, after the agent's
+    patch is applied (see
+    ``benchmarks/swebench_pro/evaluator/swe_bench_pro_eval.py:create_entryscript``).
+    Set ``SWARMS_SWEBENCH_PRO_SEED_TESTS=1`` for DGM-equivalent runs;
+    results are NOT comparable to public SWE-bench Pro leaderboards
+    when seeding is enabled.
+    """
     from swe_bench.utils import log_container_output
 
     base_commit = str(entry["base_commit"])
@@ -467,9 +481,15 @@ def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
     )
     log_container_output(container.exec_run(["/bin/bash", "-lc", setup], workdir="/"))
 
-    before_cmd = _last_before_repo_set_cmd(entry)
-    if before_cmd:
-        log_container_output(container.exec_run(["/bin/bash", "-lc", before_cmd], workdir="/app"))
+    seed_tests = os.environ.get("SWARMS_SWEBENCH_PRO_SEED_TESTS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if seed_tests:
+        before_cmd = _last_before_repo_set_cmd(entry)
+        if before_cmd:
+            log_container_output(container.exec_run(["/bin/bash", "-lc", before_cmd], workdir="/app"))
 
     commit_cmd = (
         "git -C /app add --all && "
