@@ -70,21 +70,21 @@ def make_plot(all_iterations, all_infos, info_label, all_its=False):
         'greedy': ('DGM Greedy', '#673AB7'),
         'dgm': ('DGM', '#4285F4')
     }
-    
+
     if not all_its:
         min_length = min(len(iterations) for iterations in all_iterations.values())
-    
+
     for run_type, (label, color) in labels.items():
         if run_type not in all_iterations:
             continue
 
         iterations = all_iterations[run_type]
         values = all_infos[run_type][info_label]
-        
+
         if not all_its:
             iterations = iterations[:min_length]
             values = values[:min_length]
-            
+
         plt.plot(iterations, values, marker='.', color=color, label=label)
 
     # Get y label
@@ -124,7 +124,7 @@ def main():
     # Get information for each run
     all_iterations = {}
     all_infos = {}
-    
+
     if args.path_dgm:
         iterations, info_dgm = get_run_info(args.path_dgm)
         all_iterations['dgm'] = iterations
@@ -139,7 +139,7 @@ def main():
         iterations_nodarwin, info_nodarwin = get_run_info(args.path_no_darwin)
         all_iterations['no_darwin'] = iterations_nodarwin
         all_infos['no_darwin'] = info_nodarwin
-        
+
     if args.path_greedy:
         iterations_greedy, info_greedy = get_run_info(args.path_greedy)
         all_iterations['greedy'] = iterations_greedy

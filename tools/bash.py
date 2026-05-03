@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 
 def tool_info():
     return {
@@ -47,13 +48,31 @@ class BashSession:
         )
         self._started = True
 
-    def stop(self):
+    async def stop(self):
         if not self._started:
             return
-        if self._process.returncode is None:
-            self._process.terminate()
+        if self._process is not None and self._process.returncode is None:
+            # start() puts bash in its own session via os.setsid; tear down the
+            # whole process group so backgrounded children (e.g. `sleep 10 &`)
+            # don't outlive the bash leader.
+            self._signal_process_group(signal.SIGTERM)
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                self._signal_process_group(signal.SIGKILL)
+                await self._process.wait()
         self._process = None
         self._started = False
+
+    def _signal_process_group(self, sig):
+        try:
+            pgid = os.getpgid(self._process.pid)
+        except (ProcessLookupError, OSError):
+            return
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            pass
 
     async def run(self, command):
         if not self._started:
@@ -64,7 +83,7 @@ class BashSession:
             raise ValueError(
                 f"Timed out: bash has not returned in {self._timeout} seconds and must be restarted."
             )
-        
+
         # Send command
         self._process.stdin.write(
             command.encode() + f"; echo '{self._sentinel}'\n".encode()
@@ -75,19 +94,19 @@ class BashSession:
         try:
             output = ''
             start_time = asyncio.get_event_loop().time()
-            
+
             while True:
                 if asyncio.get_event_loop().time() - start_time > self._timeout:
                     self._timed_out = True
                     raise ValueError(
                         f"Timed out: bash has not returned in {self._timeout} seconds and must be restarted."
                     )
-                
+
                 await asyncio.sleep(self._output_delay)
                 # Read from the internal buffer
                 stdout_data = self._process.stdout._buffer.decode(errors='ignore')
                 stderr_data = self._process.stderr._buffer.decode(errors='ignore')
-                
+
                 if self._sentinel in stdout_data:
                     output = stdout_data[: stdout_data.index(self._sentinel)]
                     break
@@ -130,9 +149,8 @@ def filter_error(error):
 
 async def tool_function_call(command):
     """Execute a command in the bash shell."""
+    bash_session = BashSession()
     try:
-        bash_session = BashSession()
-
         if not bash_session._started:
             await bash_session.start()
 
@@ -146,6 +164,8 @@ async def tool_function_call(command):
         return result.strip()
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        await bash_session.stop()
 
 def tool_function(command):
     return asyncio.run(tool_function_call(command))

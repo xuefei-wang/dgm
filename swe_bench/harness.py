@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import docker
 from datasets import load_dataset
+from dotenv import load_dotenv
 
 from prompts.testrepo_prompt import get_test_description
 from swebench.harness.test_spec import make_test_spec
@@ -20,6 +21,48 @@ from swe_bench.utils import (
     setup_logger,
 )
 from utils.common_utils import load_json_file
+
+
+def _load_shared_env() -> None:
+    """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
+
+    Wrapper scripts export DGM_CLAUDE_MODEL / DGM_OPENAI_MODEL / DGM_CODE_MODEL /
+    DGM_SELF_IMPROVE_MODEL / DGM_DIAGNOSE_MODEL / DGM_REASONING_EFFORT before
+    invoking DGM. Without this snapshot, the subsequent load_dotenv(..., override=True)
+    would re-read the static defaults in shared.env / .env.openai (e.g.
+    DGM_OPENAI_MODEL=gpt-5.4-mini) and silently overwrite the wrapper's per-sweep
+    choice. See llm.py for the original PR #501 fix that this mirrors.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    env_paths = [
+        repo_root / "configs" / "providers" / ".env.shared",
+        repo_root / "configs" / "providers" / ".env.haiku",
+        repo_root / "configs" / "providers" / ".env.openai",
+        repo_root / "configs" / "models" / "shared.env",
+    ]
+    authoritative_keys = (
+        "DGM_CLAUDE_MODEL",
+        "DGM_OPENAI_MODEL",
+        "DGM_CODE_MODEL",
+        "DGM_SELF_IMPROVE_MODEL",
+        "DGM_DIAGNOSE_MODEL",
+        "DGM_REASONING_EFFORT",
+    )
+    snapshot = {k: os.environ.get(k) for k in authoritative_keys if os.environ.get(k) is not None}
+    for env_path in env_paths:
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+    for k, v in snapshot.items():
+        os.environ[k] = v
+
+
+def _collect_runtime_env(names):
+    env_vars = {}
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            env_vars[name] = value
+    return env_vars
 
 def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
     """
@@ -39,6 +82,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         return {"success": True, "instance_id": instance_id}
 
     try:
+        _load_shared_env()
         # Create and start the Docker container
         client = docker.from_env()
         run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -111,14 +155,25 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         log_container_output(exec_result)
 
         # Run the agent
-        env_vars = {
-            "ANTHROPIC_API_KEY": os.getenv('ANTHROPIC_API_KEY'),
-            "AWS_REGION": os.getenv('AWS_REGION'),
-            "AWS_REGION_NAME": os.getenv('AWS_REGION_NAME'),
-            "AWS_ACCESS_KEY_ID": os.getenv('AWS_ACCESS_KEY_ID'),
-            "AWS_SECRET_ACCESS_KEY": os.getenv('AWS_SECRET_ACCESS_KEY'),
-            "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
-        }
+        env_vars = _collect_runtime_env([
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "AWS_REGION",
+            "AWS_REGION_NAME",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "DGM_CLAUDE_MODEL",
+            "DGM_OPENAI_MODEL",
+            "DGM_CODE_MODEL",
+            "DGM_SELF_IMPROVE_MODEL",
+            "DGM_DIAGNOSE_MODEL",
+            "DGM_REASONING_EFFORT",
+            "OPENAI_REASONING_EFFORT",
+            "REASONING_EFFORT",
+        ])
         safe_log("Running the agent")
         cmd = [
             "timeout", "32400",  # 9h timeout
@@ -192,8 +247,9 @@ def harness(
         pred_dname='./swe_bench/predictions',
     ):
     """
+    _load_shared_env()
     Parallel processing harness using ThreadPoolExecutor.
-    
+
     Args:
         test_task_list: List of task IDs to process (None for all)
         num_samples: Number of samples to process (-1 for all)
@@ -205,7 +261,7 @@ def harness(
     # Load dataset
     dataset = load_dataset("princeton-nlp/SWE-bench_Verified")
     dataset = dataset['test']
-    
+
     # Ensure that necessary directories exist
     if model_name_or_path is None:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -213,7 +269,7 @@ def harness(
     pred_dname = Path(pred_dname)
     pred_dname.mkdir(exist_ok=True)
     out_dnames = []
-    
+
     # Prepare the dataset entries
     entries = list(dataset)
     if test_task_list:
@@ -224,15 +280,15 @@ def harness(
     # Build the environment images
     client = docker.from_env()
     build_env_images(client, dataset=entries, force_rebuild=False, max_workers=max_workers)
-    
+
     # Define a function to handle a single evaluation for all specified issues
     def process_evaluation(eval_idx):
         model_name_or_path_inst = f"{model_name_or_path}_{eval_idx}"
         out_dname = pred_dname / model_name_or_path_inst
         out_dname.mkdir(exist_ok=True)
-        
+
         print(f"Starting evaluation {eval_idx} for model {model_name_or_path}")
-        
+
         # Process entries in parallel
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
@@ -240,7 +296,7 @@ def harness(
                 executor.submit(process_entry, entry, out_dname, model_name_or_path_inst, model_patch_paths): entry
                 for entry in entries
             }
-            
+
             # Process completed tasks as they finish
             for future in as_completed(future_to_entry):
                 result = future.result()
@@ -269,7 +325,7 @@ def main():
     parser.add_argument("--pred_dname", type=str, default="./swe_bench/predictions", help="Output directory for predictions")
     parser.add_argument("--test_task_list", type=str, default=None, help="Subset of swe issues to process")
     args = parser.parse_args()
-    
+
     # Load the test task list
     if args.test_task_list == 'small':
         test_task_list = load_json_file("./swe_bench/subsets/small.json")

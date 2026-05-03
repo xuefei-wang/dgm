@@ -122,7 +122,7 @@ def run_instance(
         )
         if val.exit_code != 0:
             logger.info(f"Failed to apply patch to container, trying again...")
-            
+
             # try "patch --batch --fuzz=5 -p1 -i {patch_path}" to try again
             val = container.exec_run(
                 "patch --batch --fuzz=5 -p1 -i /tmp/patch.diff",
@@ -310,7 +310,7 @@ def get_dataset_from_preds(
         missing_preds = set(instance_ids) - set(predictions.keys())
         if missing_preds:
             print(f"Warning: Missing predictions for {len(missing_preds)} instance IDs.")
-    
+
     # check that all prediction IDs are in the dataset
     prediction_ids = set(predictions.keys())
     if prediction_ids - dataset_ids:
@@ -367,7 +367,7 @@ def make_run_report(
         full_dataset (list): List of all instances
         client (docker.DockerClient): Docker client
         run_id (str): Run ID
-    
+
     Returns:
         Path to report file
     """
@@ -386,7 +386,7 @@ def make_run_report(
     for instance in full_dataset:
         instance_id = instance[KEY_INSTANCE_ID]
         if instance_id not in predictions:
-            # skip instances without 
+            # skip instances without
             incomplete_ids.add(instance_id)
             continue
         prediction = predictions[instance_id]

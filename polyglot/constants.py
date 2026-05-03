@@ -42,7 +42,7 @@ NPM_TEST_COMMANDS = [
 CPP_TEST_COMMANDS = [
     "set -e",
     "[ ! -d \"build\" ] && mkdir build",
-    "cd build", 
+    "cd build",
     "cmake -DEXERCISM_RUN_ALL_TESTS=1 -G \"Unix Makefiles\" ..",
     "make",
     "cd ../"
@@ -54,7 +54,7 @@ TEST_COMMANDS = {
     "rust": ["cargo test -- --include-ignored"],
     "go": ["go test ./..."],
     "javascript": NPM_TEST_COMMANDS,
-    "cpp": CPP_TEST_COMMANDS, 
+    "cpp": CPP_TEST_COMMANDS,
     "java": ["./gradlew test"],
 }
 
@@ -62,7 +62,7 @@ PYTHON_SPECS = {
     "python": "3.11",
     "pip_packages": [
         "flake8~=5.0.4",
-        "pylint~=2.17.1", 
+        "pylint~=2.17.1",
         "black==22.3.0",
         "yapf~=0.32.0",
         "tomli>=1.1.0",
@@ -102,7 +102,7 @@ GENERIC_SPECS = {
 MAP_REPO_VERSION_TO_SPECS = {
     "python": PYTHON_SPECS,
     "rust": GENERIC_SPECS["rust"],
-    "go": GENERIC_SPECS["go"], 
+    "go": GENERIC_SPECS["go"],
     "javascript": GENERIC_SPECS["javascript"],
     "cpp": GENERIC_SPECS["cpp"],
     "java": GENERIC_SPECS["java"]

@@ -42,6 +42,12 @@ TEST_COMMANDS = {
 # Thread-local storage for logger instances
 thread_local = threading.local()
 
+
+def select_code_model(self_improve=False):
+    if self_improve:
+        return os.getenv("DGM_SELF_IMPROVE_MODEL") or OPENAI_MODEL
+    return os.getenv("DGM_CODE_MODEL") or CLAUDE_MODEL
+
 def get_thread_logger():
     """
     Get the logger instance specific to the current thread.
@@ -62,25 +68,25 @@ def setup_logger(log_file='./chat_history.md', level=logging.INFO):
     # Create logger with a unique name based on thread ID
     logger = logging.getLogger(f'AgenticSystem-{threading.get_ident()}')
     logger.setLevel(level)
-    
+
     # Remove existing handlers to avoid duplicates
     logger.handlers = []
-    
+
     # Create formatters
     file_formatter = logging.Formatter('%(message)s')
-    
+
     # Create and set up file handler
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     file_handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
     file_handler.setLevel(level)
     file_handler.setFormatter(file_formatter)
-    
+
     # Add handlers to logger
     logger.addHandler(file_handler)
-    
+
     # Store logger in thread-local storage
     set_thread_logger(logger)
-    
+
     return logger
 
 def safe_log(message, level=logging.INFO):
@@ -112,12 +118,12 @@ class AgenticSystem:
         self.self_improve = self_improve
         self.language = language
 
-        # Set the code model based on whether self-improvement is enabled
-        self.code_model = CLAUDE_MODEL if not self_improve else OPENAI_MODEL
+        # Preserve upstream defaults unless the experiment config pins a code model.
+        self.code_model = select_code_model(self_improve=self.self_improve)
 
         # Initialize logger and store it in thread-local storage
         self.logger = setup_logger(chat_history_file)
-        
+
         # Clear the log file
         with open(chat_history_file, 'w') as f:
             f.write('')

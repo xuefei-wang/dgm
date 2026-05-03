@@ -2,12 +2,33 @@
 import json
 import os
 import re
+from pathlib import Path
 
 import anthropic
 import backoff
 import openai
+from dotenv import load_dotenv
 
 MAX_OUTPUT_TOKENS = 4096
+
+
+def _resolve_dgm_temperature(default: float = 0.7) -> float:
+    """Read DGM_TEMPERATURE from env; fall back to ``default`` (0.7) when unset.
+
+    Cross-runner sweeps export DGM_TEMPERATURE=0.0 to align with HyperAgents'
+    default of 0.0. When the env var is absent the legacy 0.7 is preserved so
+    solo DGM runs remain unchanged.
+    """
+    raw = os.environ.get("DGM_TEMPERATURE", "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < 0.0 or value > 2.0:
+        return default
+    return value
 AVAILABLE_LLMS = [
     # Anthropic models
     "claude-3-5-sonnet-20240620",
@@ -20,6 +41,7 @@ AVAILABLE_LLMS = [
     "o1-mini-2024-09-12",
     "o1-2024-12-17",
     "o3-mini-2025-01-31",
+    "gpt-5.4-mini",
     # OpenRouter models
     "llama3.1-405b",
     # Anthropic Claude models via Amazon Bedrock
@@ -41,6 +63,175 @@ AVAILABLE_LLMS = [
     "deepseek-reasoner",
 ]
 
+
+def _load_shared_env() -> None:
+    """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
+
+    The wrapper at scripts/experiments/run_cross_runner_sweep.sh::configure_model_preset
+    exports DGM_CLAUDE_MODEL / DGM_OPENAI_MODEL / DGM_CODE_MODEL /
+    DGM_SELF_IMPROVE_MODEL / DGM_DIAGNOSE_MODEL / DGM_REASONING_EFFORT
+    BEFORE invoking DGM_outer.py. Without the snapshot below, our subsequent
+    load_dotenv(..., override=True) call would re-read the static defaults
+    in shared.env / .env.openai (e.g. ``DGM_OPENAI_MODEL=gpt-5.4-mini``) and
+    silently overwrite the wrapper's per-sweep choice — so a Haiku sweep
+    would still print "Using OpenAI API with model gpt-5.4-mini" (observed
+    in the audit_3x2_haiku_audit revalidation).
+
+    Snapshot the DGM_* keys (and a few other authoritative wrapper-set
+    overrides) up-front, run the dotenv loaders, then restore.
+    """
+    path = Path(__file__).resolve()
+    repo_root = path.parents[2] if len(path.parents) > 2 else path.parent
+    env_paths = [
+        repo_root / "configs" / "providers" / ".env.shared",
+        repo_root / "configs" / "providers" / ".env.haiku",
+        repo_root / "configs" / "providers" / ".env.openai",
+        repo_root / "configs" / "models" / "shared.env",
+    ]
+    authoritative_keys = (
+        "DGM_CLAUDE_MODEL",
+        "DGM_OPENAI_MODEL",
+        "DGM_CODE_MODEL",
+        "DGM_SELF_IMPROVE_MODEL",
+        "DGM_DIAGNOSE_MODEL",
+        "DGM_REASONING_EFFORT",
+    )
+    snapshot = {k: os.environ.get(k) for k in authoritative_keys if os.environ.get(k) is not None}
+    for env_path in env_paths:
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+    # Restore wrapper-set overrides on top of whatever the dotenv files set.
+    for k, v in snapshot.items():
+        os.environ[k] = v
+
+
+_load_shared_env()
+
+
+def is_openai_responses_model(model: str) -> bool:
+    return model.startswith(("gpt-5", "gpt-4.1", "o1-", "o3-", "o4-")) or model in {"o1", "o3", "o4"}
+
+
+def is_openai_reasoning_model(model: str) -> bool:
+    return model.startswith(("gpt-5", "o1-", "o3-", "o4-")) or model in {"o1", "o3", "o4"}
+
+
+def openai_reasoning_config(model: str):
+    effort = (
+        os.getenv("DGM_REASONING_EFFORT")
+        or os.getenv("OPENAI_REASONING_EFFORT")
+        or os.getenv("REASONING_EFFORT")
+        or "medium"
+    ).strip()
+    if not effort or not is_openai_reasoning_model(model):
+        return None
+    return {"effort": effort}
+
+
+def extract_response_text(response) -> str:
+    output_text = getattr(response, "output_text", None)
+    if output_text:
+        return output_text
+
+    chunks = []
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            text = getattr(content, "text", None)
+            if text:
+                chunks.append(text)
+    return "\n".join(chunks)
+
+
+def _plain_usage_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {k: _plain_usage_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_usage_value(v) for v in value]
+    if hasattr(value, "model_dump"):
+        return _plain_usage_value(value.model_dump())
+    if hasattr(value, "to_dict"):
+        return _plain_usage_value(value.to_dict())
+    if hasattr(value, "__dict__"):
+        return {
+            k: _plain_usage_value(v)
+            for k, v in vars(value).items()
+            if not k.startswith("_")
+        }
+    return str(value)
+
+
+def _nested_get(data, *keys):
+    current = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def _bedrock_region() -> str | None:
+    return _first_not_none(
+        os.getenv("AWS_REGION_NAME"),
+        os.getenv("AWS_REGION"),
+        os.getenv("AWS_DEFAULT_REGION"),
+    )
+
+
+def extract_token_usage(response, model: str = "") -> dict:
+    """Normalize provider usage metadata without mutating API message history."""
+    raw_usage = _plain_usage_value(getattr(response, "usage", None))
+    if not isinstance(raw_usage, dict):
+        return {}
+
+    input_tokens = _first_not_none(raw_usage.get("input_tokens"), raw_usage.get("prompt_tokens"))
+    output_tokens = _first_not_none(raw_usage.get("output_tokens"), raw_usage.get("completion_tokens"))
+    cached_tokens = _first_not_none(
+        _nested_get(raw_usage, "input_tokens_details", "cached_tokens"),
+        _nested_get(raw_usage, "prompt_tokens_details", "cached_tokens"),
+        raw_usage.get("cache_read_input_tokens"),
+    )
+    cache_creation_tokens = raw_usage.get("cache_creation_input_tokens")
+    reasoning_tokens = _first_not_none(
+        _nested_get(raw_usage, "output_tokens_details", "reasoning_tokens"),
+        _nested_get(raw_usage, "completion_tokens_details", "reasoning_tokens"),
+    )
+    total_tokens = raw_usage.get("total_tokens")
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    usage = {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cached_tokens": cached_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "raw_usage": raw_usage,
+    }
+    return {k: v for k, v in usage.items() if v is not None}
+
+
+def log_token_usage(logging, response, model: str, context: str) -> None:
+    usage = extract_token_usage(response, model=model)
+    if not usage or logging is None:
+        return
+    payload = {"context": context, **usage}
+    try:
+        logging(f"TOKEN_USAGE {json.dumps(payload, sort_keys=True)}")
+    except Exception:
+        pass
+
+
 def create_client(model: str):
     """
     Create and return an LLM client based on the specified model.
@@ -58,14 +249,15 @@ def create_client(model: str):
         client = anthropic.AnthropicBedrock(
             aws_access_key=os.getenv("AWS_ACCESS_KEY_ID"),
             aws_secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            aws_region=os.getenv("AWS_REGION_NAME"),
+            aws_region=_bedrock_region(),
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
         )
         return client, client_model
     elif model.startswith("vertex_ai") and "claude" in model:
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
         return anthropic.AnthropicVertex(), client_model
-    elif 'gpt' in model or model.startswith("o1-") or model.startswith("o3-"):
+    elif 'gpt' in model or model.startswith(("o1-", "o3-", "o4-")) or model in {"o1", "o3", "o4"}:
         print(f"Using OpenAI API with model {model}.")
         return openai.OpenAI(), model
     elif model.startswith("deepseek-"):
@@ -176,10 +368,13 @@ def get_response_from_llm(
         system_message,
         print_debug=False,
         msg_history=None,
-        temperature=0.7,
+        temperature=None,
+        logging=None,
 ):
     if msg_history is None:
         msg_history = []
+    if temperature is None:
+        temperature = _resolve_dgm_temperature()
 
     if "claude" in model:
         new_msg_history = msg_history + [
@@ -200,6 +395,7 @@ def get_response_from_llm(
             system=system_message,
             messages=new_msg_history,
         )
+        log_token_usage(logging, response, model, "get_response_from_llm")
         content = response.content[0].text
         new_msg_history = new_msg_history + [
             {
@@ -226,24 +422,46 @@ def get_response_from_llm(
             stop=None,
             seed=0,
         )
+        log_token_usage(logging, response, model, "get_response_from_llm")
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model.startswith("o1-") or model.startswith("o3-"):
-        new_msg_history = msg_history + [{"role": "user", "content": system_message + msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                # {"role": "user", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=1,
-            # max_completion_tokens=MAX_OUTPUT_TOKENS,
-            n=1,
-            # stop=None,
-            seed=0,
+    elif is_openai_responses_model(model):
+        user_text = f"{system_message}\n\n{msg}"
+        new_msg_history = msg_history + [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": user_text,
+                    }
+                ],
+            }
+        ]
+        response_kwargs = {
+            "model": model,
+            "input": new_msg_history,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+        }
+        reasoning = openai_reasoning_config(model)
+        if reasoning:
+            response_kwargs["reasoning"] = reasoning
+        response = client.responses.create(
+            **response_kwargs,
         )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+        log_token_usage(logging, response, model, "get_response_from_llm")
+        content = extract_response_text(response)
+        new_msg_history = new_msg_history + [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": content,
+                    }
+                ],
+            }
+        ]
     elif model in ["deepseek-chat", "deepseek-coder"]:
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
@@ -257,6 +475,7 @@ def get_response_from_llm(
             n=1,
             stop=None,
         )
+        log_token_usage(logging, response, model, "get_response_from_llm")
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
     elif model in ["deepseek-reasoner"]:
@@ -270,9 +489,9 @@ def get_response_from_llm(
             n=1,
             stop=None,
         )
+        log_token_usage(logging, response, model, "get_response_from_llm")
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-        reasoning_content = response.choices[0].message.reasoning_content
     elif model.startswith("llama3.1-"):
         llama_size = model.split("-")[-1]
         client_model = f"meta-llama/llama-3.1-{llama_size}-instruct"
@@ -288,9 +507,9 @@ def get_response_from_llm(
             n=1,
             stop=None,
         )
+        log_token_usage(logging, response, client_model, "get_response_from_llm")
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-        resoning_content = response.choices[0].message.reasoning_content
     else:
         raise ValueError(f"Model {model} not supported.")
     if print_debug:
@@ -305,26 +524,26 @@ def get_response_from_llm(
 def extract_json_between_markers(llm_output):
     inside_json_block = False
     json_lines = []
-    
+
     # Split the output into lines and iterate
     for line in llm_output.split('\n'):
         striped_line = line.strip()
-        
+
         # Check for start of JSON code block
         if striped_line.startswith("```json"):
             inside_json_block = True
             continue
-        
+
         # Check for end of code block
         if inside_json_block and striped_line.startswith("```"):
             # We've reached the closing triple backticks.
             inside_json_block = False
             break
-        
+
         # If we're inside the JSON block, collect the lines
         if inside_json_block:
             json_lines.append(line)
-    
+
     # If we never found a JSON code block, fallback to any JSON-like content
     if not json_lines:
         # Fallback: Try a regex that finds any JSON-like object in the text
@@ -346,7 +565,7 @@ def extract_json_between_markers(llm_output):
 
     # Join all lines in the JSON block into a single string
     json_string = "\n".join(json_lines).strip()
-    
+
     # Try to parse the collected JSON lines
     try:
         return json.loads(json_string)

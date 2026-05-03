@@ -1,17 +1,18 @@
 import os
-import git
 import subprocess
 
 
 def get_git_commit_hash(repo_path='.'):
-    try:
-        # Load the repository
-        repo = git.Repo(repo_path)
-        # Get the current commit hash
-        commit_hash = repo.head.commit.hexsha
-        return commit_hash
-    except Exception as e:
-        print("Error while getting git commit hash:", e)
+    result = subprocess.run(
+        ["git", "-C", repo_path, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    else:
+        print("Error while getting git commit hash:", result.stderr.strip())
         return None
 
 def apply_patch(git_dname, patch_str):
@@ -51,7 +52,6 @@ def diff_versus_commit(git_dname, commit):
     # Generate diffs for untracked files
     for file in untracked_files:
         # Diff untracked file against /dev/null (empty file)
-        file_path = os.path.join(git_dname, file)
         devnull = '/dev/null'
         if os.name == 'nt':  # Handle Windows
             devnull = 'NUL'

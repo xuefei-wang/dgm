@@ -29,5 +29,5 @@ Use the available tools in this format:
 }}
 </tool_use>
 ```
-""".format(tools_available=tools_available)    
+""".format(tools_available=tools_available)
     return tooluse_prompt.strip()

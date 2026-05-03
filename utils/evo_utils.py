@@ -55,12 +55,12 @@ def get_all_performance(run_keyword, results_dir='./swe_bench'):
         f for f in os.listdir(results_dir)
         if f.endswith('.json') and run_keyword in f
     ]
-    
+
     # Return an empty list if no matches are found
     if not matching_files:
         print(f"No evaluation files found matching the keyword '{run_keyword}'.")
         return None, None
-    
+
     # Process each matching file
     performance_results = []
     total_resolved_instances = 0
@@ -90,7 +90,7 @@ def get_all_performance(run_keyword, results_dir='./swe_bench'):
     overall_performance['total_unresolved_ids'] = total_unresolved_ids
     overall_performance['total_emptypatch_ids'] = total_emptypatch_ids
     overall_performance['total_resolved_ids'] = total_resolved_ids
-    
+
     return performance_results, overall_performance
 
 def is_compiled_self_improve(metadata, num_swe_issues=[], logger=None):

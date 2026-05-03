@@ -50,7 +50,7 @@ coding_agent_summary_polyglot = """# Coding Agent Summary
   - Verify the implementation details of helper functions prior to usage to ensure proper integration and expected behavior.
   - **DO NOT create parsing errors tools or functions, collecting raw error messages and letting the agent analyze them will be more efficient.**
 \n\n
-""" + """ 
+""" + """
 ### DOC: tool function schema
 
 Carefully consider whether to add/enhance the current tool or edit the workflow in forward()
@@ -199,6 +199,8 @@ def read_mdlog_file(filepath, filter=True):
 
 def find_selfimprove_eval_logs(entry, out_dir, commit_id='initial', filter=True):
     predictions_dir = os.path.join(out_dir, commit_id, 'predictions')
+    if not os.path.isdir(predictions_dir):
+        return [], [], [], []
     all_preds_folders = [f for f in os.listdir(predictions_dir) if os.path.isdir(os.path.join(predictions_dir, f))]
     prediction_log_files = [os.path.join(predictions_dir, f, f"{entry}.md") for f in all_preds_folders]
     prediction_json_files = [os.path.join(predictions_dir, f, f"{entry}.json") for f in all_preds_folders]
@@ -274,8 +276,8 @@ In <JSON>, provide a JSON response with the following fields:
 
 Your response will be automatically parsed, so ensure that the string response is precisely in the correct format. Do NOT include the `<JSON>` tag in your output."""
 
-diagnose_prompt_stochasticity_polyglot = """Since the coding agent is stochastic, it may not produce the correct patch for the given problem statement on the first try. 
-Take into account the agent's stochastic nature and provide a solution to handle such cases. 
+diagnose_prompt_stochasticity_polyglot = """Since the coding agent is stochastic, it may not produce the correct patch for the given problem statement on the first try.
+Take into account the agent's stochastic nature and provide a solution to handle such cases.
 For example, one solution could be to ask the agent to try multiple times and select the best patch according to the test results. Scale the reflection times is also a good idea.
 Giving previous attempts and test results as context to the agent may also help.
 The tests for tasks are not provided in the repo, and the agent needs workflow design to implement them.
@@ -356,7 +358,7 @@ def get_diagnose_prompt_polyglot(entry_id, commit, root_dir, out_dir, dataset, p
         'prompts/self_improvement_prompt.py',
     ]
     code_text = get_current_code(root_dir, code_files, patch_files=patch_files, exclude_files=exclude_files, is_polyglot=is_polyglot)
-    
+
     import random
 
     if random.random() < 0.25:
@@ -372,10 +374,10 @@ def get_eval_log_text(eval_json, test_status=None):
     if not test_status:
         first_key = next(iter(eval_json))
         tests_status = eval_json[first_key].get('tests_status', {})
-    
+
     # Initialize result parts
     result_parts = []
-    
+
     # Handle FAIL_TO_PASS tests
     result_parts.append("## New tests for the issue")
     result_parts.append("These test whether the coding agent fixed the requested issue.")
@@ -390,7 +392,7 @@ def get_eval_log_text(eval_json, test_status=None):
             result_parts.append(f"  ✗ {test}")
     else:
         result_parts.append(f"Pass All New Tests!")
-    
+
     # Handle PASS_TO_PASS tests
     result_parts.append("## Previous tests from the repo")
     result_parts.append("These test whether the modification that coding agent made break the previous tests")
@@ -403,7 +405,7 @@ def get_eval_log_text(eval_json, test_status=None):
             result_parts.append(f"  ✗ {test}")
     else:
         result_parts.append(f"Pass All Previous Tests!")
-    
+
     return "\n".join(result_parts) if result_parts else "No test results available. Assume all tests failed."
 
 def get_current_code(current_dir, code_files, patch_files=None, exclude_files=None, is_polyglot=False):
@@ -442,7 +444,7 @@ def get_current_code(current_dir, code_files, patch_files=None, exclude_files=No
                 # Handle polyglot case
                 if is_polyglot and 'coding_agent.py' in file_path:
                     full_path = full_path.replace('coding_agent.py', f'coding_agent_polyglot.py')
-                
+
                 code_text.append(f"# {rel_path}")
                 code_text.append(read_file(full_path))
 

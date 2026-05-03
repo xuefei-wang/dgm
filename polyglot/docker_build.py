@@ -108,7 +108,7 @@ def build_image(
         if repo:
             local_folder = Path(repo)  # your source folder
             if local_folder.is_dir():
-                target_folder = build_dir / repo
+                target_folder = build_dir / ("polyglot" if local_folder.is_absolute() else repo)
                 shutil.copytree(local_folder, target_folder, dirs_exist_ok=True)
                 logger.info(f"Copied folder {local_folder} to {target_folder}")
 

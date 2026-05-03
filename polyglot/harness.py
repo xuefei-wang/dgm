@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import glob
 import json
 import os
 import tempfile
@@ -9,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import docker
 from datasets import load_dataset
+from dotenv import load_dotenv
 
 from prompts.testrepo_prompt import get_test_description
 from polyglot.test_spec import make_test_spec
@@ -24,6 +26,48 @@ from swe_bench.utils import (
     safe_log,
     setup_logger,
 )
+
+
+def _load_shared_env() -> None:
+    """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
+
+    Wrapper scripts export DGM_CLAUDE_MODEL / DGM_OPENAI_MODEL / DGM_CODE_MODEL /
+    DGM_SELF_IMPROVE_MODEL / DGM_DIAGNOSE_MODEL / DGM_REASONING_EFFORT before
+    invoking DGM. Without this snapshot, the subsequent load_dotenv(..., override=True)
+    would re-read the static defaults in shared.env / .env.openai (e.g.
+    DGM_OPENAI_MODEL=gpt-5.4-mini) and silently overwrite the wrapper's per-sweep
+    choice. See llm.py for the original PR #501 fix that this mirrors.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    env_paths = [
+        repo_root / "configs" / "providers" / ".env.shared",
+        repo_root / "configs" / "providers" / ".env.haiku",
+        repo_root / "configs" / "providers" / ".env.openai",
+        repo_root / "configs" / "models" / "shared.env",
+    ]
+    authoritative_keys = (
+        "DGM_CLAUDE_MODEL",
+        "DGM_OPENAI_MODEL",
+        "DGM_CODE_MODEL",
+        "DGM_SELF_IMPROVE_MODEL",
+        "DGM_DIAGNOSE_MODEL",
+        "DGM_REASONING_EFFORT",
+    )
+    snapshot = {k: os.environ.get(k) for k in authoritative_keys if os.environ.get(k) is not None}
+    for env_path in env_paths:
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+    for k, v in snapshot.items():
+        os.environ[k] = v
+
+
+def _collect_runtime_env(names):
+    env_vars = {}
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            env_vars[name] = value
+    return env_vars
 
 def get_eval_script(commands):
     return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + commands) + "\n"
@@ -49,6 +93,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         return result
 
     try:
+        _load_shared_env()
         # Create and start the Docker container
         client = docker.from_env()
         run_id = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -76,7 +121,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         chat_history_file_container = f'/dgm/{chat_history_file.name}'
 
         # See the checked repo
-        exec_result = container.exec_run("ls -R /testbed", workdir='/') 
+        exec_result = container.exec_run("ls -R /testbed", workdir='/')
         log_container_output(exec_result)
 
         # Get test description
@@ -99,14 +144,25 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         log_container_output(exec_result)
 
         # Run the agent
-        env_vars = {
-            "ANTHROPIC_API_KEY": os.getenv('ANTHROPIC_API_KEY'),
-            "AWS_REGION": os.getenv('AWS_REGION'),
-            "AWS_REGION_NAME": os.getenv('AWS_REGION_NAME'),
-            "AWS_ACCESS_KEY_ID": os.getenv('AWS_ACCESS_KEY_ID'),
-            "AWS_SECRET_ACCESS_KEY": os.getenv('AWS_SECRET_ACCESS_KEY'),
-            "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
-        }
+        env_vars = _collect_runtime_env([
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "AWS_REGION",
+            "AWS_REGION_NAME",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "DGM_CLAUDE_MODEL",
+            "DGM_OPENAI_MODEL",
+            "DGM_CODE_MODEL",
+            "DGM_SELF_IMPROVE_MODEL",
+            "DGM_DIAGNOSE_MODEL",
+            "DGM_REASONING_EFFORT",
+            "OPENAI_REASONING_EFFORT",
+            "REASONING_EFFORT",
+        ])
         safe_log("Running the agent")
         cmd = [
             "timeout", "600",  # 10 min timeout
@@ -156,7 +212,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         }
             out_fname.write_text(json.dumps(result, indent=4))
             return {"success": True, "instance_id": instance_id, "eval_result": eval_result}
-    
+
 
         exec_result = container.exec_run("git -C /testbed stash push " + " ".join(entry['files']['solution']), workdir='/')
         log_container_output(exec_result)
@@ -166,7 +222,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         log_container_output(exec_result)
         exec_result = container.exec_run("git -C /testbed stash pop", workdir='/')
         log_container_output(exec_result)
-        
+
         safe_log("Running the eval")
         language = entry['language']
         test_command = TEST_COMMANDS[language]
@@ -174,9 +230,9 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         eval_file.write_text(get_eval_script(test_command))
 
         copy_to_container(container, eval_file, '/testbed/eval.sh')
-        exec_result = container.exec_run("ls -R /testbed", workdir='/') 
+        exec_result = container.exec_run("ls -R /testbed", workdir='/')
         log_container_output(exec_result)
-        exec_result = container.exec_run("chmod +x /testbed/eval.sh", workdir='/') 
+        exec_result = container.exec_run("chmod +x /testbed/eval.sh", workdir='/')
         log_container_output(exec_result)
 
         exec_result = container.exec_run("timeout 120 ./eval.sh", workdir='/testbed')
@@ -186,7 +242,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             eval_result = 'resolved'
         else:
             eval_result = 'unresolved'
-        
+
         # Write result to file
         result = {
             "instance_id": instance_id,
@@ -201,7 +257,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         return {"success": True, "instance_id": instance_id, "eval_result": eval_result}
 
     except Exception as e:
-        
+
         # Check if eval_result exists in local scope
         if 'eval_result' not in locals():
             eval_result = 'incomplete'
@@ -222,7 +278,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             "success": False
         }
         out_fname.write_text(json.dumps(result, indent=4))
-        
+
         print(f"Error processing entry {instance_id}: {str(e)}")
         return {"success": False, "instance_id": instance_id, "eval_result": eval_result}
 
@@ -233,8 +289,118 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         except Exception as e:
             print(f"Error cleaning up Docker container for {instance_id}: {e}")
 
+
+def _aggregate_token_usage(pred_dir):
+    """Aggregate TOKEN_USAGE records from per-task markdown chat histories.
+
+    DGM's ``llm.py`` / ``llm_withtools.py`` emit ``TOKEN_USAGE {...json...}``
+    lines into each task's chat markdown under ``pred_dir``. This mirrors the
+    swebench_pro TOKEN_USAGE aggregator (DGM PR #11) so polyglot report.json
+    exposes the same ``llm_usage`` block that downstream sweep aggregation
+    expects from every benchmark.
+    """
+    aggregate = {
+        "calls": 0,
+        "malformed_records": 0,
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "uncached_prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    saw_cost = False
+    if pred_dir is None:
+        aggregate["cost_usd"] = None
+        return aggregate
+
+    md_files = sorted(glob.glob(os.path.join(str(pred_dir), "*.md")))
+    for md_path in md_files:
+        try:
+            with open(md_path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    if "TOKEN_USAGE" not in line:
+                        continue
+                    split_result = line.split("TOKEN_USAGE", 1)
+                    payload = split_result[1].lstrip(": ").strip()
+                    try:
+                        record = json.loads(payload)
+                    except json.JSONDecodeError:
+                        aggregate["malformed_records"] += 1
+                        continue
+
+                    input_tokens = int(record.get("input_tokens") or 0)
+                    output_tokens = int(record.get("output_tokens") or 0)
+                    total_tokens = int(record.get("total_tokens") or 0)
+                    cached_tokens = int(record.get("cached_tokens") or 0)
+                    reasoning_tokens = int(record.get("reasoning_tokens") or 0)
+
+                    aggregate["calls"] += 1
+                    aggregate["prompt_tokens"] += input_tokens
+                    aggregate["cached_prompt_tokens"] += cached_tokens
+                    aggregate["uncached_prompt_tokens"] += max(input_tokens - cached_tokens, 0)
+                    aggregate["completion_tokens"] += output_tokens
+                    aggregate["total_tokens"] += total_tokens or input_tokens + output_tokens
+                    aggregate["reasoning_tokens"] += reasoning_tokens
+
+                    cost = record.get("cost_usd")
+                    if isinstance(cost, (int, float)):
+                        aggregate["cost_usd"] += float(cost)
+                        saw_cost = True
+        except OSError:
+            continue
+
+    if not saw_cost:
+        aggregate["cost_usd"] = None
+    return aggregate
+
+
+def build_report(entries, results, pred_dir=None):
+    incomplete_ids = [result["instance_id"] for result in results if not result["success"]]
+    completed_ids = [result["instance_id"] for result in results if result["success"]]
+    resolved_ids = []
+    unresolved_ids = []
+    error_ids = []
+    empty_patch_ids = []
+    unstopped_containers = []
+    unremoved_images = []
+
+    for result in results:
+        if result["success"]:
+            if result.get("eval_result") == "resolved":
+                resolved_ids.append(result["instance_id"])
+            elif result.get("eval_result") == "unresolved":
+                unresolved_ids.append(result["instance_id"])
+            elif result.get("eval_result") == "empty_patch":
+                empty_patch_ids.append(result["instance_id"])
+            else:
+                error_ids.append(result["instance_id"])
+
+    return {
+        "total_instances": len(entries),
+        "submitted_instances": len(results),
+        "completed_instances": len(completed_ids),
+        "resolved_instances": len(resolved_ids),
+        "unresolved_instances": len(unresolved_ids),
+        "empty_patch_instances": len(empty_patch_ids),
+        "error_instances": len(error_ids),
+        "unstopped_instances": len(unstopped_containers),
+        "completed_ids": list(sorted(completed_ids)),
+        "incomplete_ids": list(sorted(incomplete_ids)),
+        "empty_patch_ids": list(sorted(empty_patch_ids)),
+        "submitted_ids": list(sorted(result["instance_id"] for result in results)),
+        "resolved_ids": list(sorted(resolved_ids)),
+        "unresolved_ids": list(sorted(unresolved_ids)),
+        "error_ids": list(sorted(error_ids)),
+        "unstopped_containers": list(sorted(unstopped_containers)),
+        "unremoved_images": list(sorted(unremoved_images)),
+        "llm_usage": _aggregate_token_usage(pred_dir),
+        "schema_version": 2,
+    }
+
 def harness(
-        dataset_path="polyglot/polyglot_benchmark_metadata.json",
+        dataset_path=None,
         test_task_list=None,
         num_samples=-1,
         max_workers=4,
@@ -246,8 +412,9 @@ def harness(
         output_dir='./polyglot/predictions'
     ):
     """
+    _load_shared_env()
     Parallel processing harness using ThreadPoolExecutor.
-    
+
     Args:
         test_task_list: List of task IDs to process (None for all)
         num_samples: Number of samples to process (-1 for all)
@@ -256,6 +423,13 @@ def harness(
         model_patch_paths: Paths to the model patches for dgm
         num_evals: Repeated number of swe evaluations
     """
+    _load_shared_env()
+    if dataset_path is None:
+        dataset_path = os.getenv(
+            "DGM_POLYGLOT_METADATA",
+            "../../benchmarks/polyglot/source/polyglot_benchmark_metadata.json",
+        )
+
     if model_patch_paths:
         for model_patch_path in model_patch_paths:
             # Read and modify model patch
@@ -274,15 +448,17 @@ def harness(
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
     with open(dataset_path) as f:
         dataset = json.load(f)
-    
+
     # Ensure that necessary directories exist
     if model_name_or_path is None:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         model_name_or_path = f"{timestamp}--claude-3-5-sonnet-20241022"
     pred_dname = Path(pred_dname)
-    pred_dname.mkdir(exist_ok=True)
+    pred_dname.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     out_dnames = []
-    
+
     # Prepare the dataset entries
     entries = list(dataset)
     if test_task_list:
@@ -293,15 +469,15 @@ def harness(
     # Build the environment images
     client = docker.from_env()
     build_env_images(client, dataset=entries, max_workers=max_workers, force_rebuild=False)
-    
+
     # Define a function to handle a single evaluation for all specified issues
     def process_evaluation(eval_idx):
         model_name_or_path_inst = f"{model_name_or_path}_{eval_idx}"
         out_dname = pred_dname / model_name_or_path_inst
         out_dname.mkdir(exist_ok=True)
-        
+
         print(f"Starting evaluation {eval_idx} for model {model_name_or_path}")
-        
+
         # Process entries in parallel
         results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -310,65 +486,24 @@ def harness(
                 executor.submit(process_entry, entry, out_dname, model_name_or_path_inst, model_patch_paths): entry
                 for entry in entries
             }
-            
+
             # Process completed tasks as they finish
             for future in as_completed(future_to_entry):
                 result = future.result()
-                results.append(future.result())
+                results.append(result)
                 if result["success"]:
                     print(f"Successfully processed entry {result['instance_id']} for eval {eval_idx}")
                 else:
                     print(f"Failed to process entry {result['instance_id']} for eval {eval_idx}: {result.get('error', 'Unknown error')}")
         # Get final results from completed futures
-            
+
         return out_dname, results
 
     out_dname, results = process_evaluation(0)
     print(f"All evaluations completed for model {model_name_or_path}")
 
     # Directly generate report
-    # write report to file
-    incomplete_ids = [result["instance_id"] for result in results if not result["success"]]
-    completed_ids = [result["instance_id"] for result in results if result["success"]]
-    # Get resolved/unresolved/error/empty patch IDs from results
-    resolved_ids = []
-    unresolved_ids = []
-    error_ids = []
-    empty_patch_ids = []
-    unstopped_containers = []
-    unremoved_images = []
-
-    for result in results:
-        if result["success"]:
-            if result.get("eval_result") == "resolved":
-                resolved_ids.append(result["instance_id"])
-            elif result.get("eval_result") == "unresolved":
-                unresolved_ids.append(result["instance_id"])
-            elif result.get("eval_result") == "empty_patch":
-                empty_patch_ids.append(result["instance_id"]) 
-            else:
-                error_ids.append(result["instance_id"])
-    
-    report = {
-        "total_instances": len(dataset),
-        "submitted_instances": len(results),
-        "completed_instances": len(completed_ids),
-        "resolved_instances": len(resolved_ids),
-        "unresolved_instances": len(unresolved_ids),
-        "empty_patch_instances": len(empty_patch_ids),
-        "error_instances": len(error_ids),
-        "unstopped_instances": len(unstopped_containers),
-        "completed_ids": list(sorted(completed_ids)),
-        "incomplete_ids": list(sorted(incomplete_ids)),
-        "empty_patch_ids": list(sorted(empty_patch_ids)),
-        "submitted_ids": list(sorted(result["instance_id"] for result in results)),
-        "resolved_ids": list(sorted(resolved_ids)),
-        "unresolved_ids": list(sorted(unresolved_ids)),
-        "error_ids": list(sorted(error_ids)),
-        "unstopped_containers": list(sorted(unstopped_containers)),
-        "unremoved_images": list(sorted(unremoved_images)),
-        "schema_version": 2,
-    }
+    report = build_report(entries, results, pred_dir=out_dname)
 
     print(report)
     report_file = output_dir / Path(
@@ -392,20 +527,24 @@ def main():
     parser.add_argument("--num_evals", type=int, default=1, help="Repeated number of swe evaluations")
     parser.add_argument("--num_evals_parallel", type=int, default=1, help="Number of parallel repeated evaluations")
     args = parser.parse_args()
-    
-    with open("polyglot/polyglot_benchmark_metadata.json") as f:
+
+    dataset_path = os.getenv(
+        "DGM_POLYGLOT_METADATA",
+        "../../benchmarks/polyglot/source/polyglot_benchmark_metadata.json",
+    )
+    with open(dataset_path) as f:
         metadata = json.loads(f.read())
         language_task_list = [entry["instance_id"] for entry in metadata if entry["instance_id"].startswith("python")]
         # Create a list of all tasks from metadata
         all_task_list = [entry["instance_id"] for entry in metadata]
-        
+
     from utils.common_utils import load_json_file
     swe_issues_med = load_json_file("./polyglot/subsets/medium.json")
     model_patch_paths = args.model_patch_paths.split(',') if args.model_patch_paths is not None else None
     # Run the parallel harness
 
     harness(
-        dataset_path="polyglot/polyglot_benchmark_metadata.json",
+        dataset_path=dataset_path,
         test_task_list=all_task_list,
         num_samples=args.num_samples,
         max_workers=args.max_workers,

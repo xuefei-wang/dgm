@@ -118,7 +118,7 @@ def make_report(
         predictions_jsonl = preds_to_jsonl(dname, predictions)
         run_evals(predictions_jsonl, run_id, dataset_name, root_dir, output_dir, num_eval_procs=num_eval_procs)
         print(f"Report generated for {dname}")
-    
+
     # Use ThreadPoolExecutor to parallelize over dnames
     if run_ids is None or len(run_ids) != len(dnames):
         run_ids = [f"{i:03}" for i in range(len(dnames))]

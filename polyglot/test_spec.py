@@ -6,8 +6,10 @@ import hashlib
 import json
 import platform
 import re
+import subprocess
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Union, cast
 
 from polyglot.constants import (
@@ -21,10 +23,20 @@ from polyglot.dockerfiles import (
     get_dockerfile_env,
     get_dockerfile_instance,
 )
-from swebench.harness.utils import (
-    get_requirements,
-    get_environment_yml,
-)
+def get_requirements(instance: dict) -> str:
+    requirements = instance.get("requirements")
+    if not requirements:
+        return ""
+    if isinstance(requirements, list):
+        return "\n".join(requirements) + "\n"
+    return str(requirements)
+
+
+def get_environment_yml(instance: dict, env_name: str) -> str:
+    environment_yml = instance.get("environment_yml") or instance.get("environment")
+    if environment_yml:
+        return str(environment_yml)
+    return f"name: {env_name}\ndependencies: []\n"
 
 DIFF_MODIFIED_FILE_REGEX = r"--- a/(.*)"
 
@@ -40,6 +52,7 @@ class TestSpec:
     eval_script_list: list[str]
     env_script_list: list[str]
     arch: str
+    base_commit: str = ""
 
     @property
     def setup_env_script(self):
@@ -74,7 +87,38 @@ class TestSpec:
 
     @property
     def instance_image_key(self):
-        return f"pb.eval.{self.arch}.{self.instance_id}:latest"
+        """Hash the practice-repo state into the image tag so rebuilds of the
+        benchmark's practice repos (which change commit SHAs every time
+        register_git runs with different timestamps) cause cached images to
+        invalidate. Ported from baselines/hyperagents/domains/polyglot/test_spec.py.
+
+        Without this, a stale ``pb.eval.{arch}.{instance_id}:latest`` image
+        can hold an /testbed whose git history no longer contains the
+        ``test_commit`` (or ``base_commit``) recorded in the metadata, which
+        surfaces as ``fatal: Could not parse object <sha>`` exit-128 during
+        the harness's ``git reset --hard {test_commit}``. Observed on
+        rust__wordy in audit_sweep_openai_openai_audit.
+        """
+        hash_object = hashlib.sha256()
+        hash_object.update(self.instance_id.encode("utf-8"))
+        hash_object.update((self.base_commit or "").encode("utf-8"))
+        hash_object.update(self._get_repo_state_key().encode("utf-8"))
+        hash_value = hash_object.hexdigest()[:12]
+        return f"pb.eval.{self.arch}.{self.instance_id}.{hash_value}:latest"
+
+    def _get_repo_state_key(self) -> str:
+        repo_path = Path(self.repo)
+        try:
+            return subprocess.check_output(
+                ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except Exception:
+            try:
+                return str(repo_path.stat().st_mtime_ns)
+            except FileNotFoundError:
+                return "missing-repo"
 
     def get_instance_container_name(self, run_id=None):
         if not run_id:
@@ -117,8 +161,9 @@ def make_repo_script_list(specs, repo, repo_directory, base_commit, env_name):
     Create a list of bash commands to set up the repository for testing.
     This is the setup script for the instance image.
     """
+    container_repo = "polyglot" if Path(repo).is_absolute() else repo
     setup_commands = [
-        f"cd /{repo}",
+        f"cd /{container_repo}",
         f"git clone . {repo_directory}",
         f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
         f"cd {repo_directory}",
@@ -128,8 +173,8 @@ def make_repo_script_list(specs, repo, repo_directory, base_commit, env_name):
         f"conda activate {env_name}",
         'echo "Current environment: $CONDA_DEFAULT_ENV"',
     ]
-    if repo in MAP_REPO_TO_INSTALL:
-        setup_commands.append(MAP_REPO_TO_INSTALL[repo])
+    if container_repo in MAP_REPO_TO_INSTALL:
+        setup_commands.append(MAP_REPO_TO_INSTALL[container_repo])
 
     # Run pre-install set up if provided
     if "pre_install" in specs:
@@ -318,4 +363,5 @@ def make_test_spec(instance: dict) -> TestSpec:
         repo_script_list=repo_script_list,
         eval_script_list=eval_script_list,
         arch=arch,
+        base_commit=base_commit,
     )

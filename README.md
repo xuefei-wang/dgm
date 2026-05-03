@@ -26,12 +26,29 @@ Repository for **Darwin Gödel Machine (DGM)**, a novel self-improving system th
 # API keys, add to ~/.bashrc
 export OPENAI_API_KEY='...'
 export ANTHROPIC_API_KEY='...'
+
+# DGM_CLAUDE_MODEL defaults to an Anthropic Bedrock route, which requires AWS
+# credentials. For direct Anthropic API runs, choose the coding model explicitly.
+export DGM_CODE_MODEL='claude-haiku-4-5-20251001'
 ```
+
+Optional model/profile settings can be supplied with DGM-specific variables:
+
+```bash
+export DGM_OPENAI_MODEL='gpt-5.4-mini'
+export DGM_CODE_MODEL='gpt-5.4-mini'
+export DGM_SELF_IMPROVE_MODEL='gpt-5.4-mini'
+export DGM_DIAGNOSE_MODEL='gpt-5.4-mini'
+export DGM_REASONING_EFFORT='medium'
+```
+
+For a Haiku run, set the same `DGM_*_MODEL` variables to the desired Claude
+model and provide `ANTHROPIC_API_KEY`.
 
 ```bash
 # Verify that Docker is properly configured in your environment.
 docker run hello-world
- 
+
 # If a permission error occurs, add the user to the Docker group
 sudo usermod -aG docker $USER
 newgrp docker
@@ -84,7 +101,7 @@ By default, outputs will be saved in the `output_dgm/` directory.
 This [google drive folder](https://drive.google.com/drive/folders/1Kcu9TbIa9Z50pJ7S6hH9omzzD1pxIYZC?usp=sharing) contains all the foundation model output logs from the experiments shown in the paper.
 
 ## Safety Consideration
-> [!WARNING]  
+> [!WARNING]
 > This repository involves executing untrusted, model-generated code. We strongly advise users to be aware of the associated safety risks. While it is highly unlikely that such code will perform overtly malicious actions under our current settings and with the models we use, it may still behave destructively due to limitations in model capability or alignment. By using this repository, you acknowledge and accept these risks.
 
 ## Acknowledgement
