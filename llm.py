@@ -9,7 +9,7 @@ import backoff
 import openai
 from dotenv import load_dotenv
 
-MAX_OUTPUT_TOKENS = 4096
+MAX_OUTPUT_TOKENS = 16384
 AVAILABLE_LLMS = [
     # Anthropic models
     "claude-3-5-sonnet-20240620",

@@ -20,6 +20,18 @@ from prompts.tooluse_prompt import get_tooluse_prompt
 from tools import load_all_tools
 
 
+def _max_tool_calls() -> int:
+    """Read ``DGM_MAX_TOOL_CALLS`` from the environment. ``0`` (default) or any
+    non-positive value disables the cap; positive integers cap the per-call
+    tool-loop iteration count. Opt-in: existing callers see unchanged behavior
+    until they set the env var explicitly."""
+    try:
+        v = int(os.getenv("DGM_MAX_TOOL_CALLS", "0") or "0")
+    except ValueError:
+        v = 0
+    return v if v > 0 else 0
+
+
 def _load_shared_env() -> None:
     """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
 
@@ -96,7 +108,7 @@ def get_response_withtools(
             response = client.messages.create(
                 model=model,
                 messages=messages,
-                max_tokens=4096,
+                max_tokens=16384,
                 tool_choice=tool_choice,
                 tools=tools,
             )
@@ -374,7 +386,13 @@ def chat_with_agent_manualtools(msg, model, msg_history=None, logging=print):
 
         # Tool use
         tool_use = check_for_tool_use(response, model=client_model)
+        cap = _max_tool_calls()
+        n_tool_calls = 0
         while tool_use:
+            if cap and n_tool_calls >= cap:
+                logging(f"DGM_MAX_TOOL_CALLS cap ({cap}) reached; breaking tool loop")
+                break
+            n_tool_calls += 1
             # Process tool call
             tool_name = tool_use['tool_name']
             tool_input = tool_use['tool_input']
@@ -444,7 +462,13 @@ def chat_with_agent_claude(
 
         # Check for tool use
         tool_use = check_for_tool_use(response, model=client_model)
+        cap = _max_tool_calls()
+        n_tool_calls = 0
         while tool_use:
+            if cap and n_tool_calls >= cap:
+                logging(f"DGM_MAX_TOOL_CALLS cap ({cap}) reached; breaking tool loop")
+                break
+            n_tool_calls += 1
             # Process tool call
             tool_name = tool_use['tool_name']
             tool_input = tool_use['tool_input']
@@ -536,7 +560,13 @@ def chat_with_agent_openai(
         # Check for tool use
         tool_use = check_for_tool_use(response, model=client_model)
         logging(tool_use)
+        cap = _max_tool_calls()
+        n_tool_calls = 0
         while tool_use:
+            if cap and n_tool_calls >= cap:
+                logging(f"DGM_MAX_TOOL_CALLS cap ({cap}) reached; breaking tool loop")
+                break
+            n_tool_calls += 1
             # Process tool call
             tool_name = tool_use['tool_name']
             tool_input = tool_use['tool_input']
