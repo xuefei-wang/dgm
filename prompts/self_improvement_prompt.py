@@ -304,6 +304,25 @@ In <JSON>, provide a JSON response with the following fields:
 
 Your response will be automatically parsed, so ensure that the string response is precisely in the correct format. Do NOT include the `<JSON>` tag in your output."""
 
+# --- Leak-free diagnose ablation (swarms) ------------------------------------
+# By upstream DGM design, the self-improvement *diagnose* step is shown the
+# benchmark's solver-HIDDEN grader content (SWE-bench `test_patch`; Polyglot
+# `reference_tests`/`reference_answers`) and its output reshapes the coding agent
+# used on future graded tasks. That is an information-parity leak: a meta-LLM
+# sees content a fair solver never gets. Setting DGM_DIAGNOSE_LEAKFREE=1 withholds
+# it, so the diagnoser sees only solver-visible signal (the issue/instructions,
+# the agent's own predicted patch, and its own eval logs). Default (unset) keeps
+# the published DGM behavior so canonical baseline numbers stay reproducible.
+_LEAKFREE_PLACEHOLDER = (
+    "(withheld under DGM_DIAGNOSE_LEAKFREE=1 - grader tests/answers are not "
+    "available to the agent at solve time and are not shown to the diagnoser)"
+)
+
+
+def _diagnose_leakfree():
+    return os.getenv('DGM_DIAGNOSE_LEAKFREE', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
 def get_diagnose_prompt_swe(entry_id, commit, root_dir, out_dir, dataset, patch_files=[]):
     if entry_id == 'solve_empty_patches':
         # Get user prompt for solving empty patches
@@ -321,6 +340,9 @@ def get_diagnose_prompt_swe(entry_id, commit, root_dir, out_dir, dataset, patch_
         entry = next((e for e in dataset if e['instance_id'] == entry_id), None)
         answer_patch = entry['patch']
         test_patch = entry['test_patch']
+        if _diagnose_leakfree():
+            answer_patch = _LEAKFREE_PLACEHOLDER
+            test_patch = _LEAKFREE_PLACEHOLDER
         github_issue = entry['problem_statement']
         diagnose_prompt_out = swe_issue_prompt + diagnose_prompt.format(md_log=md_log, eval_log=eval_log, predicted_patch=predicted_patch, answer_patch=answer_patch, test_patch=test_patch, github_issue=github_issue)
 
@@ -347,6 +369,9 @@ def get_diagnose_prompt_polyglot(entry_id, commit, root_dir, out_dir, dataset, p
     is_polyglot = 'language' in entry
     answer_patch = entry['patch'] if not is_polyglot else entry['reference_answers']
     test_patch = entry['test_patch'] if not is_polyglot else entry['reference_tests']
+    if _diagnose_leakfree():
+        answer_patch = _LEAKFREE_PLACEHOLDER
+        test_patch = _LEAKFREE_PLACEHOLDER
     github_issue = entry['problem_statement']
 
     code_files = ['coding_agent.py', 'tools/', 'utils/']
