@@ -1,6 +1,6 @@
-# DGM Polyglot — leak-free diagnose ablation
+# DGM Polyglot — leak-free diagnose (default fix + ablation)
 
-## What this is
+## The bug
 
 By **upstream DGM design**, the self-improvement *diagnose* step is shown the
 benchmark's solver-hidden grader content and its output reshapes the coding
@@ -18,27 +18,28 @@ solver never gets, during the loop that produces DGM's reported improvement
 (Polyglot 14.2% → 30.7% in the paper). It fires only in the evolutionary loop
 (`DGM_outer.py`), **not** in a plain initial eval — so the initial 14.2% is clean.
 
-## The gate
+## The fix (default behavior in this fork)
 
-`prompts/self_improvement_prompt.py` adds an env gate, **default off**:
+`prompts/self_improvement_prompt.py` now **withholds the hidden grader content
+from the diagnose prompt BY DEFAULT** (replaced by a placeholder). To reproduce
+the published DGM behavior (e.g. to match the paper's numbers), opt back in:
 
 ```
-DGM_DIAGNOSE_LEAKFREE=1   # withhold reference_tests / reference_answers / test_patch
-                          # from the diagnose prompt (replaced by a placeholder)
+DGM_DIAGNOSE_ALLOW_TEST_LEAK=1   # restore published DGM (diagnoser sees the private tests)
 ```
 
-Unset (default) reproduces published DGM behavior exactly, so canonical baseline
-numbers stay reproducible. This is a **labeled ablation, not a replacement
-baseline** — the canonical DGM baseline is the leaky arm.
+So the default is leak-free; the leak is available only as an explicit, labeled
+opt-out.
 
-## Verify the gate (no API/Docker)
+## Verify (no API/Docker)
 
 ```
 python ablation/test_diagnose_leakfree.py
-# PASS: gate OFF -> hidden tests present in prompt; gate ON -> absent (+ placeholder)
+# PASS: default -> hidden tests absent from prompt (+ placeholder);
+#       DGM_DIAGNOSE_ALLOW_TEST_LEAK=1 -> hidden tests present
 ```
 
-## Run the 2-arm ablation (needs Docker + OPENAI_API_KEY)
+## A/B the two behaviors (needs Docker + OPENAI_API_KEY)
 
 ```
 DGM_POLYGLOT_TASK_MAP=/path/to/polyglot_10.json \
@@ -46,10 +47,12 @@ GENERATION_LIMIT=3 REPEATS=1 \
 bash ablation/run_leakfree_ablation.sh
 ```
 
-Both arms share one initial agent + one initial eval (leak is only in the
-diagnose step), then run the outer loop with the gate off (`leaky`) vs on
-(`leakfree`). Compare archive-best resolved counts across arms.
+Runs both arms with one shared initial agent + initial eval (the leak is only in
+the diagnose step): `leaky` (`DGM_DIAGNOSE_ALLOW_TEST_LEAK=1`) vs `leakfree`
+(default). Compare archive-best resolved counts across arms.
 
-**Power caveat:** DGM's loop is stochastic and the gain is cumulative/noisy. A
-few generations at `REPEATS=1` is illustrative only. For a materiality claim use
-`REPEATS>=3` and a larger `GENERATION_LIMIT`.
+**Power / infra caveat:** DGM's loop is stochastic and cumulative; a few
+generations at `REPEATS=1` is illustrative only. The polyglot eval defaults to
+`--max-workers 5` — on a memory-constrained/shared host the concurrent rust/cpp
+eval containers can OOM (exit 137), which dominates small runs. For a materiality
+claim, cap eval concurrency (`--max-workers 1-2`) and use `REPEATS>=3`.

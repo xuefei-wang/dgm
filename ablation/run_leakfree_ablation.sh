@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # DGM Polyglot leak-free diagnose ablation — 2-arm runner.
 #
-# Arm A (leaky / canonical):   DGM_DIAGNOSE_LEAKFREE unset -> published DGM
+# Arm A (leaky / published):   DGM_DIAGNOSE_ALLOW_TEST_LEAK=1 -> published DGM
 #                              (diagnose LLM is shown the hidden grader tests).
-# Arm B (leak-free):           DGM_DIAGNOSE_LEAKFREE=1     -> diagnose LLM sees
+# Arm B (leak-free / DEFAULT): no env (default)            -> diagnose LLM sees
 #                              only solver-visible signal.
 #
 # Both arms share ONE initial agent + ONE initial eval (the leak is only in the
@@ -60,7 +60,7 @@ echo "[ablation] dgm=$DGM_DIR gens=$GENERATION_LIMIT repeats=$REPEATS model=$DGM
 newest_output_dir() { ls -dt "$DGM_DIR"/output_dgm/*/ 2>/dev/null | head -1; }
 
 run_arm() {
-  local arm="$1" leakfree_val="$2" rep="$3"
+  local arm="$1" allow_leak_val="$2" rep="$3"
   local tag="${arm}_rep${rep}"
   local pred_dir="$OUT_ROOT/$tag/initial_eval/predictions"
   local report_dir="$OUT_ROOT/$tag/initial_eval/reports"
@@ -68,7 +68,7 @@ run_arm() {
   local model_name="initial_polyglot_${tag}"
   mkdir -p "$pred_dir" "$report_dir"
 
-  echo "[ablation] === arm=$arm rep=$rep (DGM_DIAGNOSE_LEAKFREE='${leakfree_val}') ==="
+  echo "[ablation] === arm=$arm rep=$rep (DGM_DIAGNOSE_ALLOW_TEST_LEAK='${allow_leak_val}') ==="
   if [[ "$DRY_RUN" == "true" ]]; then echo "[dry-run] would run initial eval + outer loop for $tag"; return 0; fi
 
   # 1) initial eval (identical agent for both arms; leak is not here)
@@ -85,7 +85,7 @@ run_arm() {
 
   # 2) outer self-improvement loop with the leak gate set per-arm
   ( cd "$DGM_DIR" && \
-    DGM_DIAGNOSE_LEAKFREE="$leakfree_val" \
+    DGM_DIAGNOSE_ALLOW_TEST_LEAK="$allow_leak_val" \
     timeout --signal=TERM --kill-after=60 "$WALLCLOCK_CAP_SEC" \
     env "UV_PROJECT_ENVIRONMENT=$BASELINE_VENV_DIR" uv run \
     python DGM_outer.py --polyglot --shallow_eval \
@@ -105,8 +105,8 @@ run_arm() {
 }
 
 for rep in $(seq 1 "$REPEATS"); do
-  run_arm leaky    ""  "$rep"
-  run_arm leakfree "1" "$rep"
+  run_arm leaky    "1" "$rep"   # opt into the published leak
+  run_arm leakfree ""  "$rep"   # default = leak-free
 done
 
 echo "[ablation] done. Outputs under $OUT_ROOT/. Compare archive-best resolved counts: leaky vs leakfree."

@@ -1,9 +1,10 @@
-"""Deterministic check that DGM_DIAGNOSE_LEAKFREE removes the test/answer leak.
+"""Deterministic check that the diagnose step is leak-free BY DEFAULT.
 
 Upstream DGM feeds the self-improvement *diagnose* LLM the benchmark's
 solver-hidden grader content (Polyglot `reference_tests` / `reference_answers`,
 SWE-bench `test_patch`). This test renders the real diagnose prompt with the
-gate OFF and ON and asserts the secret test source is present only when OFF.
+the default (leak-free) and the DGM_DIAGNOSE_ALLOW_TEST_LEAK=1 opt-out, and
+asserts the secret test source appears ONLY when the leak is explicitly allowed.
 
 No API / Docker / keys needed. Run from the dgm repo root:
     python ablation/test_diagnose_leakfree.py
@@ -45,9 +46,11 @@ def _render(leakfree: bool) -> str:
     ]
 
     if leakfree:
-        os.environ["DGM_DIAGNOSE_LEAKFREE"] = "1"
+        # default behavior: no opt-out env -> tests withheld
+        os.environ.pop("DGM_DIAGNOSE_ALLOW_TEST_LEAK", None)
     else:
-        os.environ.pop("DGM_DIAGNOSE_LEAKFREE", None)
+        # explicit opt-in to the published leak
+        os.environ["DGM_DIAGNOSE_ALLOW_TEST_LEAK"] = "1"
 
     _system, user = sip.get_diagnose_prompt_polyglot(
         "python__sentinel", "initial", _ROOT, "/tmp/unused_outdir", dataset
@@ -62,22 +65,22 @@ def main() -> int:
     failures = []
     # Baseline (gate off) must expose the hidden test source — proves the leak exists.
     if SECRET_TESTS not in leaky:
-        failures.append("gate OFF: expected reference_tests in diagnose prompt, not found")
+        failures.append("leak allowed: expected reference_tests in diagnose prompt, not found")
     # Leak-free (gate on) must NOT expose it, and should show the placeholder.
     if SECRET_TESTS in safe:
-        failures.append("gate ON: reference_tests STILL present (leak not closed)")
+        failures.append("default: reference_tests STILL present (leak not closed by default)")
     if SECRET_ANSWER in safe:
-        failures.append("gate ON: reference_answers present (answer leak not closed)")
+        failures.append("default: reference_answers present (answer leak not closed by default)")
     if sip._LEAKFREE_PLACEHOLDER not in safe:
-        failures.append("gate ON: leak-free placeholder missing")
+        failures.append("default: leak-free placeholder missing")
 
     if failures:
         print("FAIL:")
         for f in failures:
             print("  -", f)
         return 1
-    print("PASS: DGM_DIAGNOSE_LEAKFREE withholds reference_tests/answers from the diagnose prompt")
-    print(f"  gate OFF -> secret present ({len(leaky)} chars), gate ON -> secret absent ({len(safe)} chars)")
+    print("PASS: diagnose is leak-free by default; DGM_DIAGNOSE_ALLOW_TEST_LEAK=1 restores the leak")
+    print(f"  leak-allowed -> secret present ({len(leaky)} chars), default -> secret absent ({len(safe)} chars)")
     return 0
 
 
