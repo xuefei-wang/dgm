@@ -1,10 +1,20 @@
+# Reproducibility note (kcsi issue #863):
+# These production deps were fully unpinned. The exact versions used for the
+# published DGM baseline runs are NOT documented, so the pins below are a
+# defensible best-effort, NOT a verified freeze. The unpinned (non-SDK) deps
+# below still need a maintainer freeze to the published-run versions for a
+# fully deterministic reinstall. The SDK-breaking deps (`anthropic`, `openai`)
+# carry explicit upper caps to block the next breaking major; the ranges are
+# wide enough not to exclude what currently resolves.
 datasets
-anthropic
+# anthropic/openai ship breaking releases; cap below the next major. Exact
+# freeze pending maintainer confirmation against published runs (#863).
+anthropic>=0.40,<1.0
 anthropic[bedrock]
 backoff
 botocore
 boto3
-openai
+openai>=1.0,<3.0
 
 # SWE-Bench
 beautifulsoup4
@@ -12,7 +22,6 @@ chardet
 docker
 ghapi
 GitPython
-pre-commit
 python-dotenv
 rich
 unidiff

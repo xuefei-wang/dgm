@@ -1,3 +1,6 @@
+# dev tooling (moved out of prod requirements.txt; kcsi #863)
+pre-commit
+
 # analysis
 networkx
 pygraphviz

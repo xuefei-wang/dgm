@@ -10,6 +10,25 @@ import openai
 from dotenv import load_dotenv
 
 MAX_OUTPUT_TOKENS = 4096
+
+
+def _resolve_dgm_temperature(default: float = 0.7) -> float:
+    """Read DGM_TEMPERATURE from env; fall back to ``default`` (0.7) when unset.
+
+    Cross-runner sweeps export DGM_TEMPERATURE=0.0 to align with HyperAgents'
+    default of 0.0. When the env var is absent the legacy 0.7 is preserved so
+    solo DGM runs remain unchanged.
+    """
+    raw = os.environ.get("DGM_TEMPERATURE", "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value < 0.0 or value > 2.0:
+        return default
+    return value
 AVAILABLE_LLMS = [
     # Anthropic models
     "claude-3-5-sonnet-20240620",
@@ -349,11 +368,13 @@ def get_response_from_llm(
         system_message,
         print_debug=False,
         msg_history=None,
-        temperature=0.7,
+        temperature=None,
         logging=None,
 ):
     if msg_history is None:
         msg_history = []
+    if temperature is None:
+        temperature = _resolve_dgm_temperature()
 
     if "claude" in model:
         new_msg_history = msg_history + [

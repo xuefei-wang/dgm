@@ -48,12 +48,37 @@ def _env_positive_int(name: str, default: int) -> int:
 
 
 DEFAULT_OFFICIAL_EVAL_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_OFFICIAL_EVAL_TIMEOUT_SEC", 3600)
+
+
+def _cross_runner_agent_timeout_sec() -> int:
+    """Return the agent timeout, checking CROSS_RUNNER_AGENT_TIMEOUT_SEC first.
+
+    CROSS_RUNNER_AGENT_TIMEOUT_SEC (sweep-level override across all runners)
+    is checked first so sweep scripts can set a single unified timeout without
+    touching DGM-specific env vars.  Falls through to DGM_SWEBENCH_AGENT_TIMEOUT_SEC
+    and then to the legacy 32400s default when the cross-runner var is absent,
+    empty, or non-positive (treated as "use DGM default").
+    """
+    cross_raw = os.environ.get("CROSS_RUNNER_AGENT_TIMEOUT_SEC", "").strip()
+    if cross_raw:
+        try:
+            cross_val = int(cross_raw)
+        except ValueError:
+            cross_val = 0
+        if cross_val > 0:
+            return cross_val
+    # Fall through to DGM-specific var or legacy default.
+    return _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 32400)
+
+
 # Match upstream DGM's SWE-bench Verified harness, which hardcodes
 # `timeout 32400` (9h) on the agent. Changing this would shorten DGM's
 # per-task budget on Pro vs. published Verified, biasing the comparison.
-# Configurable via env var so devs can tune for iteration; production
-# campaigns should leave it unset.
-DEFAULT_AGENT_TIMEOUT_SEC = _env_positive_int("DGM_SWEBENCH_AGENT_TIMEOUT_SEC", 32400)
+# Configurable via DGM_SWEBENCH_AGENT_TIMEOUT_SEC (DGM-specific) or
+# CROSS_RUNNER_AGENT_TIMEOUT_SEC (sweep-level override across all runners);
+# the cross-runner var is checked first so sweep scripts can set a single
+# unified timeout without touching DGM-specific env vars.
+DEFAULT_AGENT_TIMEOUT_SEC = _cross_runner_agent_timeout_sec()
 AGENT_PIP_INDEX_URL = "https://pypi.org/simple"
 SAFE_INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -140,6 +165,8 @@ def _runtime_env() -> dict[str, str]:
             "DGM_REASONING_EFFORT",
             "OPENAI_REASONING_EFFORT",
             "REASONING_EFFORT",
+            "DGM_TEMPERATURE",
+            "CROSS_RUNNER_AGENT_TIMEOUT_SEC",
         ]
     )
 
@@ -349,17 +376,52 @@ def _build_problem_statement(entry: dict[str, Any]) -> str:
     return "\n".join(part for part in parts if part is not None).strip()
 
 
+def _seed_tests_enabled() -> bool:
+    """Whether SWARMS_SWEBENCH_PRO_SEED_TESTS is truthy.
+
+    When False (default), the bridge runs in upstream-strict mode:
+    no grader scripts are copied into the agent container and the agent
+    prompt does not name specific test files. See
+    ``benchmarks/swebench_pro/evaluator/swe_bench_pro_eval.py:create_entryscript``
+    for the upstream contract.
+    """
+    return os.environ.get("SWARMS_SWEBENCH_PRO_SEED_TESTS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _build_test_description(entry: dict[str, Any]) -> str:
     selected_files = _parse_string_list(entry.get("selected_test_files_to_run"))
-    lines = [
-        "SWE-bench Pro evaluates this repository with the official per-instance Docker image.",
-        "When the official test script is available in this container, run it with:",
-        "`cd /app && bash /workspace/run_script.sh <specific test files>`.",
-        "Use the given command shape exactly; omit <specific test files> to run the full script.",
-    ]
-    if selected_files:
-        lines.append("Selected test files for this issue:")
-        lines.extend(f"- {path}" for path in selected_files)
+    seed_tests = _seed_tests_enabled()
+    if seed_tests:
+        lines = [
+            "SWE-bench Pro evaluates this repository with the official per-instance Docker image.",
+            "When the official test script is available in this container, run it with:",
+            "`cd /app && bash /workspace/run_script.sh <specific test files>`.",
+            "Use the given command shape exactly; omit <specific test files> to run the full script.",
+        ]
+        if selected_files:
+            lines.append("Selected test files for this issue:")
+            lines.extend(f"- {path}" for path in selected_files)
+    else:
+        # Upstream-strict: do not name test files or expose the grader
+        # script path. The agent infers relevant tests from the issue
+        # description and the repository structure, mirroring the
+        # upstream SWE-bench Pro reference protocol.
+        count_hint = (
+            f"There are {len(selected_files)} hidden test file(s) the grader will run after your patch is applied."
+            if selected_files
+            else "The grader will run a hidden set of tests after your patch is applied."
+        )
+        lines = [
+            "SWE-bench Pro evaluates this repository with a hidden per-instance test script.",
+            count_hint,
+            "Test files and the grader script are not visible inside this container.",
+            "Infer which tests are relevant from the issue description, the requirements, and the repository structure.",
+            "Run the project's own existing test commands (e.g. pytest) to validate your changes locally.",
+        ]
     lines.append("Do not solve the issue by modifying tests; make the minimal source change.")
     return "\n".join(lines)
 
@@ -446,16 +508,36 @@ def _copy_dgm_runtime(container, scripts_dir: Path, instance_id: str) -> None:
         dest = f"/dgm/{relative}"
         copy_to_container(container, source, dest)
 
-    run_script = scripts_dir / instance_dirname / "run_script.sh"
-    parser_script = scripts_dir / instance_dirname / "parser.py"
-    if run_script.exists():
-        copy_to_container(container, run_script, "/workspace/run_script.sh")
-        container.exec_run("chmod +x /workspace/run_script.sh", workdir="/")
-    if parser_script.exists():
-        copy_to_container(container, parser_script, "/workspace/parser.py")
+    # Upstream-strict: do not seed the grader's run_script.sh / parser.py
+    # into the agent's /workspace.  These scripts contain the exact test
+    # names from the eval harness; the agent could ``cat`` them and target
+    # only those tests.  Gated on the same flag as ``before_repo_set_cmd``
+    # in ``_prepare_app_repo`` so a single switch flips the whole bridge.
+    if _seed_tests_enabled():
+        run_script = scripts_dir / instance_dirname / "run_script.sh"
+        parser_script = scripts_dir / instance_dirname / "parser.py"
+        if run_script.exists():
+            copy_to_container(container, run_script, "/workspace/run_script.sh")
+            container.exec_run("chmod +x /workspace/run_script.sh", workdir="/")
+        if parser_script.exists():
+            copy_to_container(container, parser_script, "/workspace/parser.py")
 
 
 def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
+    """Prepare /app to base_commit; optionally seed grader test files.
+
+    The optional ``before_repo_set_cmd`` step (cherry-picking the
+    grader's test files into the agent repo) is gated on
+    ``SWARMS_SWEBENCH_PRO_SEED_TESTS`` (default off = upstream-strict).
+
+    The upstream SWE-bench Pro reference protocol runs
+    ``before_repo_set_cmd`` only inside the grader, after the agent's
+    patch is applied (see
+    ``benchmarks/swebench_pro/evaluator/swe_bench_pro_eval.py:create_entryscript``).
+    Set ``SWARMS_SWEBENCH_PRO_SEED_TESTS=1`` for DGM-equivalent runs;
+    results are NOT comparable to public SWE-bench Pro leaderboards
+    when seeding is enabled.
+    """
     from swe_bench.utils import log_container_output
 
     base_commit = str(entry["base_commit"])
@@ -467,9 +549,10 @@ def _prepare_app_repo(container, entry: dict[str, Any]) -> str:
     )
     log_container_output(container.exec_run(["/bin/bash", "-lc", setup], workdir="/"))
 
-    before_cmd = _last_before_repo_set_cmd(entry)
-    if before_cmd:
-        log_container_output(container.exec_run(["/bin/bash", "-lc", before_cmd], workdir="/app"))
+    if _seed_tests_enabled():
+        before_cmd = _last_before_repo_set_cmd(entry)
+        if before_cmd:
+            log_container_output(container.exec_run(["/bin/bash", "-lc", before_cmd], workdir="/app"))
 
     commit_cmd = (
         "git -C /app add --all && "
