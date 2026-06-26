@@ -1,32 +1,27 @@
-# Reproducibility note (kcsi issue #863):
-# These production deps were fully unpinned. The exact versions used for the
-# published DGM baseline runs are NOT documented, so the pins below are a
-# defensible best-effort, NOT a verified freeze. The unpinned (non-SDK) deps
-# below still need a maintainer freeze to the published-run versions for a
-# fully deterministic reinstall. The SDK-breaking deps (`anthropic`, `openai`)
-# carry explicit upper caps to block the next breaking major; the ranges are
-# wide enough not to exclude what currently resolves.
-datasets
-# anthropic/openai ship breaking releases; cap below the next major. Exact
-# freeze pending maintainer confirmation against published runs (#863).
-anthropic>=0.40,<1.0
-anthropic[bedrock]
-backoff
-botocore
-boto3
-openai>=1.0,<3.0
+# Pinned for deterministic installs (kcsi issue #863).
+# These were previously unpinned, so every install already floated to the
+# latest releases; the pins below freeze that current resolution (a consistent
+# set resolved together on 2026-06-26) so a reinstall is reproducible. They are
+# NOT claimed to match the published DGM baseline runs — those versions were
+# never recorded. Bump deliberately.
+datasets==5.0.0
+anthropic[bedrock]==0.112.0
+backoff==2.2.1
+botocore==1.43.36
+boto3==1.43.36
+openai==2.44.0
 
 # SWE-Bench
-beautifulsoup4
-chardet
-docker
-ghapi
-GitPython
-python-dotenv
-rich
-unidiff
+beautifulsoup4==4.15.0
+chardet==7.4.3
+docker==7.1.0
+ghapi==1.0.14
+GitPython==3.1.50
+python-dotenv==1.2.2
+rich==15.0.0
+unidiff==0.7.5
 
 # pytest
-pytest
-pytest-asyncio
-async_timeout
+pytest==9.1.1
+pytest-asyncio==1.4.0
+async_timeout==5.0.1

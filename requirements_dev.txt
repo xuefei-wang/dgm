@@ -1,8 +1,9 @@
-# dev tooling (moved out of prod requirements.txt; kcsi #863)
-pre-commit
+# dev tooling (moved out of prod requirements.txt; kcsi #863). Pinned to the
+# uv-resolved set on 2026-06-26 for deterministic installs.
+pre-commit==4.6.0
 
 # analysis
-networkx
-pygraphviz
-matplotlib
-plotly
+networkx==3.6.1
+pygraphviz==2.0
+matplotlib==3.11.0
+plotly==6.8.0
