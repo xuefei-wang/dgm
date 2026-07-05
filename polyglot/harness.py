@@ -28,6 +28,29 @@ from swe_bench.utils import (
 )
 
 
+def _polyglot_agent_timeout_sec(default: int = 600) -> int:
+    """Resolve the polyglot agent timeout (seconds).
+
+    Checks CROSS_RUNNER_AGENT_TIMEOUT_SEC first (sweep-level override shared
+    across all runners), then DGM_POLYGLOT_AGENT_TIMEOUT_SEC (DGM-specific),
+    falling back to ``default`` (the legacy 600s / 10-min budget) when neither
+    is set to a positive integer. Mirrors swe_bench.pro_harness'
+    _cross_runner_agent_timeout_sec so the polyglot harness honors the same
+    sweep-level timeout as the SWE-bench Pro harness (kcsi #1125).
+    """
+    for var in ("CROSS_RUNNER_AGENT_TIMEOUT_SEC", "DGM_POLYGLOT_AGENT_TIMEOUT_SEC"):
+        raw = os.environ.get(var, "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        if value > 0:
+            return value
+    return default
+
+
 def _load_shared_env() -> None:
     """Load swarms-side shared env files but NEVER clobber wrapper-set DGM_*.
 
@@ -165,7 +188,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         ])
         safe_log("Running the agent")
         cmd = [
-            "timeout", "600",  # 10 min timeout
+            "timeout", str(_polyglot_agent_timeout_sec()),  # default 10 min; CROSS_RUNNER_AGENT_TIMEOUT_SEC overrides
             "python", "/dgm/coding_agent.py",
             "--problem_statement", problem_statement,
             "--git_dir", "/testbed/",
