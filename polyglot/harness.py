@@ -258,7 +258,10 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         exec_result = container.exec_run("chmod +x /testbed/eval.sh", workdir='/')
         log_container_output(exec_result)
 
-        exec_result = container.exec_run("timeout 120 ./eval.sh", workdir='/testbed')
+        # Unify the polyglot eval (test-execution) timeout at 180s to match the
+        # KCSI polyglot harness (--polyglot-timeout-sec 180); compiled-language
+        # test suites need more than the legacy 120s budget (kcsi #1196).
+        exec_result = container.exec_run("timeout 180 ./eval.sh", workdir='/testbed')
         log_container_output(exec_result, raise_error=False)
         eval_result_file.write_text(exec_result.output.decode())
         if exec_result.exit_code == 0:

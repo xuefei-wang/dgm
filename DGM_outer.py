@@ -23,6 +23,99 @@ def validate_swebench_pro_task_id(task_id):
     return task_id
 
 
+def aggregate_self_improve_token_usage(output_dir):
+    """Aggregate the self-improve / diagnose (archive-evolution) meta-loop LLM
+    token usage for a DGM run and write it to
+    ``output_dir/self_improve_llm_usage.json``.
+
+    DGM's ``llm.py`` emits ``TOKEN_USAGE {...json...}`` lines into the meta-loop
+    transcripts under each self-improve attempt dir
+    (``output_dir/<step_run_id>/self_evo.md`` for the self-editing coding agent
+    and ``.../self_improve.log`` for the diagnose step). These are the
+    archive-evolution overhead that the per-benchmark ``report.json``
+    ``llm_usage`` block deliberately omits -- that block only covers the
+    per-task solve transcripts under each attempt's ``predictions/`` dir, so a
+    consumer that reads only benchmark reports undercounts real DGM cost
+    (kcsi #1196 / #1125 / #1141).
+
+    We therefore walk the whole run tree for ``TOKEN_USAGE`` lines while
+    EXCLUDING any file under a ``predictions/`` directory (those solve tokens are
+    already covered by the benchmark report) and emit a single run-level
+    aggregate. Parsing mirrors ``polyglot.harness._aggregate_token_usage`` /
+    ``swe_bench.pro_harness`` exactly so the emitted block is shape-compatible
+    with the ``llm_usage`` blocks downstream cost accounting already understands.
+
+    Best-effort: never raises (cost accounting must not break a DGM run).
+    """
+    aggregate = {
+        "calls": 0,
+        "malformed_records": 0,
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "cached_prompt_tokens": 0,
+        "uncached_prompt_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    saw_cost = False
+    try:
+        for root, dirs, files in os.walk(output_dir):
+            # Skip per-task solve transcripts -- their tokens live in the
+            # benchmark report.json's llm_usage block already.
+            if "predictions" in dirs:
+                dirs.remove("predictions")
+            for fname in files:
+                if not (fname.endswith(".md") or fname.endswith(".log")):
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as handle:
+                        for line in handle:
+                            if "TOKEN_USAGE" not in line:
+                                continue
+                            payload = line.split("TOKEN_USAGE", 1)[1].lstrip(": ").strip()
+                            try:
+                                record = json.loads(payload)
+                            except json.JSONDecodeError:
+                                aggregate["malformed_records"] += 1
+                                continue
+
+                            input_tokens = int(record.get("input_tokens") or 0)
+                            output_tokens = int(record.get("output_tokens") or 0)
+                            total_tokens = int(record.get("total_tokens") or 0)
+                            cached_tokens = int(record.get("cached_tokens") or 0)
+                            reasoning_tokens = int(record.get("reasoning_tokens") or 0)
+
+                            aggregate["calls"] += 1
+                            aggregate["prompt_tokens"] += input_tokens
+                            aggregate["cached_prompt_tokens"] += cached_tokens
+                            aggregate["uncached_prompt_tokens"] += max(input_tokens - cached_tokens, 0)
+                            aggregate["completion_tokens"] += output_tokens
+                            aggregate["total_tokens"] += total_tokens or input_tokens + output_tokens
+                            aggregate["reasoning_tokens"] += reasoning_tokens
+
+                            cost = record.get("cost_usd")
+                            if isinstance(cost, (int, float)):
+                                aggregate["cost_usd"] += float(cost)
+                                saw_cost = True
+                except OSError:
+                    continue
+    except OSError:
+        pass
+
+    if not saw_cost:
+        aggregate["cost_usd"] = None
+
+    try:
+        out_path = os.path.join(output_dir, "self_improve_llm_usage.json")
+        with open(out_path, "w", encoding="utf-8") as handle:
+            json.dump(aggregate, handle, indent=4)
+    except OSError:
+        pass
+    return aggregate
+
+
 def initialize_run(
     output_dir,
     prevrun_dir=None,
@@ -517,6 +610,11 @@ def main():
                 "children_compiled": selfimprove_ids_compiled,
                 "archive": archive,
             }, indent=2) + "\n")
+
+        # Refresh the run-level self-improve (archive-evolution) token aggregate
+        # after every generation so a current total survives even if the outer
+        # loop is later killed by the sweep's wall-clock cap (kcsi #1196).
+        aggregate_self_improve_token_usage(output_dir)
 
 if __name__ == "__main__":
     main()
