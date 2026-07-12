@@ -95,6 +95,46 @@ def _collect_runtime_env(names):
 def get_eval_script(commands):
     return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + commands) + "\n"
 
+# --- Vacuous-pass guard (parity with the KCSI polyglot grader, kcsi #1137) ---
+# A language test runner can exit 0 without any test actually executing (e.g. a
+# solution neutralised the official test/build config). The KCSI polyglot
+# harness (src/kcsi/eval/polyglot_harness.py) flips such a "pass" to a fail for
+# the languages that emit a reliable zero-tests-ran signal. We mirror that here
+# so this baseline's polyglot scores are graded on the same footing as KCSI.
+#
+# Only go/rust/python have robust markers under this harness's TEST_COMMANDS.
+# cpp runs a build-time Catch2 via cmake+make (no ctest marker to key on) and,
+# together with js/java, is left to the existing `git reset --hard <test_commit>`
+# restore of the official test/build files -- matching KCSI, which likewise
+# leaves js/java unguarded.
+_GO_NO_TEST_FILES_MARKER = "[no test files]"
+_GO_TESTS_RAN_RE = re.compile(r"(?m)^ok\s")
+_RUST_TESTS_RAN_RE = re.compile(r"test result: ok\.\s+[1-9]\d*\s+passed")
+_PYTEST_NO_TESTS_MARKERS = ("no tests ran", "collected 0 items")
+
+
+def is_vacuous_pass(language, eval_output):
+    """Return True if an exit-0 polyglot eval ran zero tests (a vacuous pass).
+
+    Mirrors the KCSI polyglot vacuous-pass guard (kcsi #1137) for the languages
+    with a reliable zero-tests-ran signal. Only ever turns a *pass* into a fail,
+    never the reverse.
+    """
+    text = eval_output or ""
+    if language == "go":
+        # "[no test files]" with no "ok\t<pkg>" line -> no package ran a test.
+        return _GO_NO_TEST_FILES_MARKER in text and not _GO_TESTS_RAN_RE.search(text)
+    if language == "rust":
+        # A genuine pass reports "test result: ok. <n>=1.. passed"; absence on an
+        # exit-0 run means "test result: ok. 0 passed" (zero tests ran).
+        return not _RUST_TESTS_RAN_RE.search(text)
+    if language == "python":
+        # pytest normally exits 5 on "no tests collected"; these markers only
+        # catch a run forced to exit 0 while collecting nothing.
+        return any(marker in text for marker in _PYTEST_NO_TESTS_MARKERS)
+    return False
+
+
 def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
     """
     Process a single dataset entry. This function encapsulates the main processing logic
@@ -263,11 +303,18 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         # test suites need more than the legacy 120s budget (kcsi #1196).
         exec_result = container.exec_run("timeout 180 ./eval.sh", workdir='/testbed')
         log_container_output(exec_result, raise_error=False)
-        eval_result_file.write_text(exec_result.output.decode())
-        if exec_result.exit_code == 0:
-            eval_result = 'resolved'
-        else:
+        eval_output = exec_result.output.decode(errors='replace')
+        eval_result_file.write_text(eval_output)
+        if exec_result.exit_code != 0:
             eval_result = 'unresolved'
+        elif is_vacuous_pass(language, eval_output):
+            safe_log(
+                f"Vacuous-pass guard: {language} eval for {instance_id} exited 0 "
+                f"but ran zero tests; scoring 'unresolved' (kcsi #1137 parity)"
+            )
+            eval_result = 'unresolved'
+        else:
+            eval_result = 'resolved'
 
         # Write result to file
         result = {
