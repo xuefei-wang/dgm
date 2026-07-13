@@ -234,3 +234,24 @@ def teardown_egress_infra(client, infra) -> None:
             client.networks.get(name).remove()
         except Exception:  # noqa: BLE001
             pass
+
+
+def isolated_run_kwargs(base_kwargs: dict, infra) -> dict:
+    """Merge egress-isolation kwargs into a ``containers.run``/``create`` kwargs
+    dict for a *task-agent* (benchmark solver) container.
+
+    When ``infra`` is an ``EgressInfra`` (isolated, the default), drop any host
+    networking and attach the container to the internal no-route network + proxy,
+    so it can reach the allowlisted provider API but NOT arbitrary hosts
+    (github.com / raw.githubusercontent.com / exercism -> the public hidden-test
+    and gold-answer sources). When ``infra is None`` (open mode /
+    ``KCSI_DGM_EGRESS_OPEN``), return ``base_kwargs`` unchanged so the caller
+    keeps its legacy networking. ``network_mode`` and ``network`` are mutually
+    exclusive in the docker SDK, so the former is popped when isolating.
+    """
+    kwargs = dict(base_kwargs)
+    extra = agent_run_kwargs(infra)
+    if extra:
+        kwargs.pop("network_mode", None)
+        kwargs.update(extra)
+    return kwargs

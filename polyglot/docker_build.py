@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import shutil
 
+from utils.egress import isolated_run_kwargs
+
 from polyglot.constants import (
     BASE_IMAGE_BUILD_DIR,
     ENV_IMAGE_BUILD_DIR,
@@ -502,7 +504,8 @@ def build_container(
         run_id: str,
         logger: logging.Logger,
         nocache: bool,
-        force_rebuild: bool = False
+        force_rebuild: bool = False,
+        infra=None,
     ):
     """
     Builds the instance image for the given test spec and creates a container from the image.
@@ -530,7 +533,7 @@ def build_container(
 
         # Create the container
         logger.info(f"Creating container for {test_spec.instance_id}...")
-        container = client.containers.create(
+        base_kwargs = dict(
             image=test_spec.instance_image_key,
             name=test_spec.get_instance_container_name(run_id),
             user=user,
@@ -539,6 +542,11 @@ def build_container(
             nano_cpus=nano_cpus,
             platform=test_spec.platform,
         )
+        # Matched-info-regime: when infra is set, attach the task container
+        # to the internal no-route network + allowlisting proxy instead of
+        # the default bridge, so the agent cannot git-clone the public
+        # Exercism hidden tests / .meta solutions.
+        container = client.containers.create(**isolated_run_kwargs(base_kwargs, infra))
         logger.info(f"Container for {test_spec.instance_id} created: {container.id}")
         return container
     except Exception as e:

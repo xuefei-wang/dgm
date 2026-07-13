@@ -232,3 +232,18 @@ def test_build_dgm_container_open_has_no_network_override():
     kw = client.containers.run_kwargs
     assert "network" not in kw
     assert "environment" not in kw
+
+
+def test_isolated_run_kwargs_open_mode_is_passthrough():
+    base = {"image": "dgm", "network_mode": "host", "detach": True}
+    assert egress.isolated_run_kwargs(base, None) == base
+
+
+def test_isolated_run_kwargs_isolated_drops_host_net_and_attaches_proxy():
+    infra = egress.EgressInfra("dgm-egress-int-x", "dgm-egress-ext-x", "dgm-egress-proxy-x", 8080)
+    out = egress.isolated_run_kwargs({"image": "dgm", "network_mode": "host"}, infra)
+    assert "network_mode" not in out
+    assert out["network"] == "dgm-egress-int-x"
+    assert out["environment"]["HTTPS_PROXY"] == "http://dgm-egress-proxy-x:8080"
+    assert out["dns"] == ["0.0.0.0"]
+    assert out["image"] == "dgm"
