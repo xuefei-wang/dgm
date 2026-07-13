@@ -1,4 +1,9 @@
-from prompts.self_improvement_prompt import find_selfimprove_eval_logs, get_current_code, process_selfimprove_eval_logs
+from prompts.self_improvement_prompt import (
+    _matched_info_regime_gate,
+    find_selfimprove_eval_logs,
+    get_current_code,
+    process_selfimprove_eval_logs,
+)
 from utils.common_utils import read_file
 
 
@@ -98,17 +103,31 @@ def get_diagnose_improvement_prompt(
         entry_id, parent_commit, root_dir, model_patch_file, out_dir, run_id, dataset,
         patch_files=[],
     ):
-    md_logs, eval_logs, predicted_patches = find_selfimprove_eval_logs(entry_id, out_dir, commit_id=parent_commit)
-    md_log, eval_log, predicted_patch = process_selfimprove_eval_logs(md_logs, eval_logs, predicted_patches)
+    md_logs, eval_logs, predicted_patches, eval_results = find_selfimprove_eval_logs(
+        entry_id, out_dir, commit_id=parent_commit
+    )
+    md_log, eval_log, predicted_patch, eval_result = process_selfimprove_eval_logs(
+        md_logs, eval_logs, predicted_patches, eval_results
+    )
     code_files = ['coding_agent.py', 'tools/']
     code_text = get_current_code(root_dir, code_files, patch_files=patch_files)
     model_patch_text = read_file(model_patch_file)
-    new_md_logs, new_eval_logs, new_predicted_patches = find_selfimprove_eval_logs(entry_id, out_dir, commit_id=run_id)
-    new_md_log, new_eval_log, new_predicted_patch = process_selfimprove_eval_logs(new_md_logs, new_eval_logs, new_predicted_patches)
+    new_md_logs, new_eval_logs, new_predicted_patches, new_eval_results = find_selfimprove_eval_logs(
+        entry_id, out_dir, commit_id=run_id
+    )
+    new_md_log, new_eval_log, new_predicted_patch, new_eval_result = process_selfimprove_eval_logs(
+        new_md_logs, new_eval_logs, new_predicted_patches, new_eval_results
+    )
 
     entry = next((e for e in dataset if e['instance_id'] == entry_id), None)
-    answer_patch = entry['patch']
-    test_patch = entry['test_patch']
+    raw_answer_patch = entry['patch']
+    raw_test_patch = entry['test_patch']
+    answer_patch, test_patch, eval_log = _matched_info_regime_gate(
+        raw_answer_patch, raw_test_patch, eval_log, eval_result
+    )
+    _, _, new_eval_log = _matched_info_regime_gate(
+        raw_answer_patch, raw_test_patch, new_eval_log, new_eval_result
+    )
 
     return diagnose_improvement_system_message.format(code=code_text, model_patch_text=model_patch_text,
     answer_patch=answer_patch, test_patch=test_patch), \
