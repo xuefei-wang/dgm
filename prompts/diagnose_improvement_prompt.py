@@ -1,4 +1,5 @@
 from prompts.self_improvement_prompt import (
+    _lookup_dataset_entry,
     _matched_info_regime_gate,
     find_selfimprove_eval_logs,
     get_current_code,
@@ -99,17 +100,24 @@ Your response will be automatically parsed, so ensure that the string response i
 Focus on analyzing the impact of the model patch on the agent's performance, identifying improvements and regressions, and providing an overall score for the patch's impact.
 Your thinking should be thorough. Please think very deeply."""
 
+
 def get_diagnose_improvement_prompt(
-        entry_id, parent_commit, root_dir, model_patch_file, out_dir, run_id, dataset,
-        patch_files=[],
-    ):
+    entry_id,
+    parent_commit,
+    root_dir,
+    model_patch_file,
+    out_dir,
+    run_id,
+    dataset,
+    patch_files=[],
+):
     md_logs, eval_logs, predicted_patches, eval_results = find_selfimprove_eval_logs(
         entry_id, out_dir, commit_id=parent_commit
     )
     md_log, eval_log, predicted_patch, eval_result = process_selfimprove_eval_logs(
         md_logs, eval_logs, predicted_patches, eval_results
     )
-    code_files = ['coding_agent.py', 'tools/']
+    code_files = ["coding_agent.py", "tools/"]
     code_text = get_current_code(root_dir, code_files, patch_files=patch_files)
     model_patch_text = read_file(model_patch_file)
     new_md_logs, new_eval_logs, new_predicted_patches, new_eval_results = find_selfimprove_eval_logs(
@@ -119,20 +127,21 @@ def get_diagnose_improvement_prompt(
         new_md_logs, new_eval_logs, new_predicted_patches, new_eval_results
     )
 
-    entry = next((e for e in dataset if e['instance_id'] == entry_id), None)
-    raw_answer_patch = entry['patch']
-    raw_test_patch = entry['test_patch']
+    entry = _lookup_dataset_entry(dataset, entry_id)
+    raw_answer_patch = entry["patch"]
+    raw_test_patch = entry["test_patch"]
     answer_patch, test_patch, eval_log = _matched_info_regime_gate(
         raw_answer_patch, raw_test_patch, eval_log, eval_result
     )
-    _, _, new_eval_log = _matched_info_regime_gate(
-        raw_answer_patch, raw_test_patch, new_eval_log, new_eval_result
-    )
+    _, _, new_eval_log = _matched_info_regime_gate(raw_answer_patch, raw_test_patch, new_eval_log, new_eval_result)
 
-    return diagnose_improvement_system_message.format(code=code_text, model_patch_text=model_patch_text,
-    answer_patch=answer_patch, test_patch=test_patch), \
-        diagnose_improvement_prompt.format(
-            md_log=md_log, eval_log=eval_log,
-            new_md_log=new_md_log, new_eval_log=new_eval_log,
-            prev_predicted_patch=predicted_patch, new_predicted_patch=new_predicted_patch
-        )
+    return diagnose_improvement_system_message.format(
+        code=code_text, model_patch_text=model_patch_text, answer_patch=answer_patch, test_patch=test_patch
+    ), diagnose_improvement_prompt.format(
+        md_log=md_log,
+        eval_log=eval_log,
+        new_md_log=new_md_log,
+        new_eval_log=new_eval_log,
+        prev_predicted_patch=predicted_patch,
+        new_predicted_patch=new_predicted_patch,
+    )
