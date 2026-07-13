@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from prompts.testrepo_prompt import get_test_description
 from polyglot.test_spec import make_test_spec
 from polyglot.docker_build import build_env_images, build_container, cleanup_container
+from utils.egress import ensure_egress_infra, teardown_egress_infra
 from polyglot.constants import MAP_REPO_VERSION_TO_SPECS, TEST_COMMANDS
 from polyglot import leak_scrub
 from utils.git_utils import filter_patch_by_files, remove_patch_by_files
@@ -156,6 +157,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             result = json.loads(f.read())
         return result
 
+    egress_infra = None
     try:
         _load_shared_env()
         # Create and start the Docker container
@@ -168,8 +170,12 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         # Remove any existing container with the same name
         container_name = test_spec.get_instance_container_name(run_id)
         remove_existing_container(client, container_name)
+        # Matched-info-regime: isolate solver-container egress. Proxy runs
+        # from the python-capable "dgm" image; the polyglot task image need
+        # not have python. None in open mode.
+        egress_infra = ensure_egress_infra(client, "dgm", run_id, os.environ)
         # Now create and start the container
-        container = build_container(test_spec, client, run_id, logger, nocache, force_rebuild=False)
+        container = build_container(test_spec, client, run_id, logger, nocache, force_rebuild=False, infra=egress_infra)
         container.start()
 
         # --- History-leak lockdown (mirror kcsi sanitizeRepoHistory, issue #924) ---
@@ -412,6 +418,8 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             cleanup_container(client, container, logger)
         except Exception as e:
             print(f"Error cleaning up Docker container for {instance_id}: {e}")
+        if egress_infra is not None:
+            teardown_egress_infra(client, egress_infra)
 
 
 def _aggregate_token_usage(pred_dir):

@@ -611,12 +611,14 @@ def process_entry(
 
     client = None
     container = None
+    egress_infra = None
     model_patch = ""
     proposed_model_patches: list[str] = []
     try:
         _load_shared_env()
         import docker
         from swe_bench.utils import copy_from_container, log_container_output, remove_existing_container, setup_logger
+        from utils.egress import ensure_egress_infra, isolated_run_kwargs, teardown_egress_infra
 
         client = docker.from_env()
         run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -640,7 +642,12 @@ def process_entry(
         }
         if docker_platform:
             run_kwargs["platform"] = docker_platform
-        container = client.containers.run(image_uri, **run_kwargs)
+        # Matched-info-regime: isolate solver-container egress so a
+        # bash-capable agent cannot re-fetch hidden tests over the network.
+        # Proxy runs from the python-capable "dgm" image; the per-instance
+        # SWE-bench image keeps its own image. None in open mode.
+        egress_infra = ensure_egress_infra(client, "dgm", run_id, os.environ)
+        container = client.containers.run(image_uri, **isolated_run_kwargs(run_kwargs, egress_infra))
 
         _copy_dgm_runtime(container, scripts_dir, instance_id)
         agent_base_commit = _prepare_app_repo(container, entry)
@@ -734,6 +741,8 @@ def process_entry(
                 container.remove()
             except Exception as exc:
                 print(f"Error cleaning up Docker container for {instance_id}: {exc}")
+        if egress_infra is not None:
+            teardown_egress_infra(client, egress_infra)
 
 
 def _write_patch_bundle(
