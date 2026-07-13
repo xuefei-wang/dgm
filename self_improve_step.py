@@ -493,15 +493,22 @@ def self_improve(
         remove_existing_container,
     )
 
+    from utils.egress import ensure_egress_infra, teardown_egress_infra
+
     image_name = "dgm"
     container_name = f"dgm-container-{run_id}"
     client = docker.from_env()
     # Remove any existing container with the same name
     remove_existing_container(client, container_name)
+    # Default-isolated egress: attach the self-improvement container to an
+    # internal no-route network whose only egress is the allowlisting proxy
+    # sidecar (provider API + PyPI). None in open mode (KCSI_DGM_EGRESS_OPEN).
+    egress_infra = ensure_egress_infra(client, image_name, run_id)
     # Now create and start the container
     container = build_dgm_container(
         client, root_dir, image_name, container_name,
         force_rebuild=force_rebuild,
+        egress=egress_infra,
     )
     container.start()
     _ensure_container_git_repo(container)
@@ -551,6 +558,7 @@ def self_improve(
     else:
         safe_log("No entry provided. Exiting.")
         cleanup_container(container)
+        teardown_egress_infra(client, egress_infra)
         save_metadata(metadata, output_dir)
         return metadata
 
@@ -560,6 +568,7 @@ def self_improve(
     if not problem_statement:
         safe_log("Failed to diagnose the problem statement. Exiting.")
         cleanup_container(container)
+        teardown_egress_infra(client, egress_infra)
         save_metadata(metadata, output_dir)
         return metadata
 
@@ -618,6 +627,8 @@ def self_improve(
                 raise Exception("Model patch file is empty")
     except Exception as e:
         safe_log(f"Failed to read model patch file: {str(e)}")
+        cleanup_container(container)
+        teardown_egress_infra(client, egress_infra)
         save_metadata(metadata, output_dir)
         return metadata
 
@@ -625,6 +636,7 @@ def self_improve(
 
     # Stop and remove the container
     cleanup_container(container)
+    teardown_egress_infra(client, egress_infra)
 
     # Evaluate the performance of the self-improvement
     model_patch_exists = os.path.exists(model_patch_file)

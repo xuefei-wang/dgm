@@ -107,10 +107,17 @@ def build_dgm_container(
         image_name='app',
         container_name='app-container',
         force_rebuild=False,
+        egress=None,
     ):
     """
     Build the Docker image for the dgm app and start a container from it.
+
+    When ``egress`` is an ``EgressInfra`` (the default-isolated path set up by
+    the caller), the container is attached to the internal no-route network and
+    pointed at the allowlisting proxy sidecar. When ``egress is None`` (open
+    mode / KCSI_DGM_EGRESS_OPEN) it runs on the legacy default bridge.
     """
+    from utils.egress import agent_run_kwargs
     try:
         # Build the Docker image if force_rebuild is set or the image doesn't exist
         if force_rebuild or not any(image.tags for image in client.images.list() if image_name in image.tags):
@@ -130,7 +137,9 @@ def build_dgm_container(
 
     try:
         # Run the container
-        container = client.containers.run(image=image_name, name=container_name, detach=True)
+        run_kwargs = dict(image=image_name, name=container_name, detach=True)
+        run_kwargs.update(agent_run_kwargs(egress))
+        container = client.containers.run(**run_kwargs)
         safe_log(f"Container '{container_name}' started successfully.")
         return container
     except Exception as e:
