@@ -32,11 +32,26 @@ BLOCKED = "https://github.com"
 ALLOWED = "https://api.anthropic.com"  # 401 without a key still proves reachability
 
 
-def _curl(container, url):
-    # %{http_code} is 000 when the connection fails (blocked); any non-000 code
-    # (200/401/403) means the host was reached.
-    cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "12", url]
-    res = container.exec_run(cmd)
+# Probe with python3 (always present in the image) rather than curl, which is
+# NOT installed in python:*-slim bases. urllib honors the HTTPS_PROXY that
+# agent_run_kwargs injects, so it exercises the same egress path a real agent
+# would. Classification: a server response (200, or 401/404 surfaced as
+# HTTPError) means the host was REACHED through the proxy; a tunnel/connection
+# failure (the allowlist proxy answering 403 to CONNECT, or no route) is BLOCKED.
+_PROBE_PY = (
+    "import sys, urllib.request, urllib.error\n"
+    "try:\n"
+    "    r = urllib.request.urlopen(sys.argv[1], timeout=12)\n"
+    "    print('REACHED', r.status)\n"
+    "except urllib.error.HTTPError as e:\n"
+    "    print('REACHED', e.code)\n"
+    "except Exception as e:\n"
+    "    print('BLOCKED', type(e).__name__, str(getattr(e, 'reason', e))[:60])\n"
+)
+
+
+def _probe(container, url):
+    res = container.exec_run(["python3", "-c", _PROBE_PY, url])
     return res.output.decode().strip()
 
 
@@ -52,16 +67,16 @@ def main():
     kwargs.update(agent_run_kwargs(infra))
     container = client.containers.run(**kwargs)
     try:
-        blocked_code = _curl(container, BLOCKED)
-        allowed_code = _curl(container, ALLOWED)
-        print(f"{BLOCKED} -> HTTP {blocked_code}")
-        print(f"{ALLOWED} -> HTTP {allowed_code}")
+        blocked = _probe(container, BLOCKED)
+        allowed = _probe(container, ALLOWED)
+        print(f"{BLOCKED} -> {blocked}")
+        print(f"{ALLOWED} -> {allowed}")
 
         if egress_open():
             print("open mode: no assertions.")
             return 0
 
-        ok = blocked_code == "000" and allowed_code != "000"
+        ok = blocked.startswith("BLOCKED") and allowed.startswith("REACHED")
         if ok:
             print("PASS: blocked host unreachable, provider reachable via proxy.")
             return 0
