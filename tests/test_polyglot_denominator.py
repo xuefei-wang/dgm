@@ -25,6 +25,7 @@ def _load_polyglot_harness():
         "polyglot.test_spec",
         "polyglot.docker_build",
         "polyglot.constants",
+        "polyglot.leak_scrub",
         "swe_bench",
         "swe_bench.utils",
         "utils",
@@ -53,6 +54,10 @@ def _load_polyglot_harness():
     fake_constants = ModuleType("polyglot.constants")
     fake_constants.MAP_REPO_VERSION_TO_SPECS = {}
     fake_constants.TEST_COMMANDS = {}
+    fake_leak_scrub = ModuleType("polyglot.leak_scrub")
+    fake_leak_scrub.pre_agent_lockdown_script = lambda *_args, **_kwargs: ""
+    fake_leak_scrub.build_grade_bundle = lambda *_args, **_kwargs: None
+    fake_leak_scrub.inject_grade_bundle_script = lambda *_args, **_kwargs: ""
 
     fake_swe_bench = ModuleType("swe_bench")
     fake_swe_bench.__path__ = []
@@ -82,6 +87,7 @@ def _load_polyglot_harness():
         sys.modules["polyglot.test_spec"] = fake_test_spec
         sys.modules["polyglot.docker_build"] = fake_docker_build
         sys.modules["polyglot.constants"] = fake_constants
+        sys.modules["polyglot.leak_scrub"] = fake_leak_scrub
         sys.modules["swe_bench"] = fake_swe_bench
         sys.modules["swe_bench.utils"] = fake_swe_utils
         sys.modules["utils"] = fake_utils

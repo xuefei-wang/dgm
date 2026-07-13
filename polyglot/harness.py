@@ -16,6 +16,7 @@ from prompts.testrepo_prompt import get_test_description
 from polyglot.test_spec import make_test_spec
 from polyglot.docker_build import build_env_images, build_container, cleanup_container
 from polyglot.constants import MAP_REPO_VERSION_TO_SPECS, TEST_COMMANDS
+from polyglot import leak_scrub
 from utils.git_utils import filter_patch_by_files, remove_patch_by_files
 
 from swe_bench.utils import (
@@ -171,6 +172,31 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         container = build_container(test_spec, client, run_id, logger, nocache, force_rebuild=False)
         container.start()
 
+        # --- History-leak lockdown (mirror kcsi sanitizeRepoHistory, issue #924) ---
+        # /testbed is a local `git clone` of the per-exercise repo, so its object
+        # store + origin refs still reach test_commit (the hidden tests + the
+        # .meta/example reference solution); the /polyglot clone source keeps them
+        # on disk too. Scrub /testbed down to base_commit and remove /polyglot
+        # BEFORE the agent's unrestricted bash tool runs. Runs as root (removing
+        # the root-owned /polyglot and gc-ing need it; it re-chmods 777 after).
+        # Fail closed: if the scrub cannot be verified, abort the task rather than
+        # run the agent against a leaky workspace.
+        container_repo = "polyglot" if Path(entry["repo"]).is_absolute() else entry["repo"]
+        clone_source = f"/{container_repo}"
+        lockdown_script = leak_scrub.pre_agent_lockdown_script(
+            "/testbed", base_commit, entry["test_commit"], clone_source
+        )
+        exec_result = container.exec_run(
+            ["/bin/bash", "-c", lockdown_script], workdir="/", user="root"
+        )
+        log_container_output(exec_result)
+        if exec_result.exit_code != 0:
+            raise RuntimeError(
+                f"History-leak lockdown failed for {instance_id}; refusing to run "
+                f"the agent against a leaky workspace: "
+                f"{exec_result.output.decode(errors='replace')[-500:]}"
+            )
+
         # Copy the necessary files and requirements to the container
         copy_to_container(container, 'coding_agent_polyglot.py', '/dgm/coding_agent.py')
         copy_to_container(container, 'requirements.txt', '/dgm/requirements.txt')
@@ -276,6 +302,31 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             out_fname.write_text(json.dumps(result, indent=4))
             return {"success": True, "instance_id": instance_id, "eval_result": eval_result}
 
+
+        # Re-inject the hidden-test history that the pre-agent lockdown scrubbed
+        # from /testbed, from a git bundle built on the HOST (a source the agent
+        # could not read during its run). This restores test_commit so the
+        # grader's `git reset --hard {test_commit}` below works byte-for-byte as
+        # before. Fail closed: a failed re-injection would silently grade against
+        # base_commit (no hidden tests), inflating scores.
+        grade_bundle = out_dname / f"{instance_id}_grade_testcommit.bundle"
+        leak_scrub.build_grade_bundle(entry["repo"], grade_bundle, entry["test_commit"])
+        copy_to_container(container, str(grade_bundle), "/tmp/grade_testcommit.bundle")
+        inject_script = leak_scrub.inject_grade_bundle_script(
+            "/testbed", "/tmp/grade_testcommit.bundle", entry["test_commit"]
+        )
+        exec_result = container.exec_run(["/bin/bash", "-c", inject_script], workdir="/")
+        log_container_output(exec_result)
+        if exec_result.exit_code != 0:
+            raise RuntimeError(
+                f"Grade-time hidden-test re-injection failed for {instance_id}: "
+                f"{exec_result.output.decode(errors='replace')[-500:]}"
+            )
+        container.exec_run("rm -f /tmp/grade_testcommit.bundle", workdir="/")
+        try:
+            grade_bundle.unlink()
+        except OSError:
+            pass
 
         exec_result = container.exec_run("git -C /testbed stash push " + " ".join(entry['files']['solution']), workdir='/')
         log_container_output(exec_result)
