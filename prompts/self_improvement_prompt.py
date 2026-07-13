@@ -304,6 +304,50 @@ In <JSON>, provide a JSON response with the following fields:
 
 Your response will be automatically parsed, so ensure that the string response is precisely in the correct format. Do NOT include the `<JSON>` tag in your output."""
 
+# --- Matched information regime (fair cross-method comparison; DEFAULT) ----
+# DGM's self-improvement/diagnose LLM is upstream-designed to read the hidden
+# private tests + official answer patch + hidden test-runner output -- a strictly
+# richer optimizer regime than the per-task solver (or KCSI's distillation
+# channel) ever sees. BY DEFAULT we withhold that hidden material, leaving only
+# the scalar solved/unsolved outcome, so every method is compared on the same
+# information footing. Set KCSI_DGM_LEAK_HIDDEN_MATERIAL=1 to RE-ENABLE the
+# upstream leak (faithful, as-published DGM) for reproducing earlier,
+# information-leaky baseline numbers. Mirrors the leak-CLOSED-by-default /
+# env-re-enables convention of KCSI_GEPA_LEAK_TEST_OUTPUT and
+# KCSI_OPENEVOLVE_LEAK_TEST_OUTPUT.
+def _dgm_leak_hidden_material():
+    return os.environ.get("KCSI_DGM_LEAK_HIDDEN_MATERIAL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+_MATCHED_REGIME_WITHHELD = (
+    "[withheld under matched information regime -- the per-task solver never "
+    "sees the hidden private tests or the official answer patch; the optimizer "
+    "is matched to the solver's information for fair cross-method comparison. "
+    "Set KCSI_DGM_LEAK_HIDDEN_MATERIAL=1 to reproduce the leaky upstream run.]"
+)
+
+def _matched_regime_scalar_outcome(eval_result):
+    text = str(eval_result).lower()
+    if "empty" in text:
+        status = "unresolved (empty patch)"
+    elif "unresolved" in text or "fail" in text:
+        status = "unresolved"
+    elif "resolved" in text or "pass" in text:
+        status = "resolved"
+    else:
+        status = "unresolved (unknown)"
+    return (
+        f"Scalar outcome only: {status}. Per-test names, assertions, and hidden "
+        "test-runner output are withheld under the matched information regime."
+    )
+
+def _matched_info_regime_gate(answer_patch, test_patch, eval_log, eval_result):
+    """Withhold hidden answer/test material from the optimizer (DEFAULT), unless
+    KCSI_DGM_LEAK_HIDDEN_MATERIAL re-enables the upstream leak for reproduction."""
+    if _dgm_leak_hidden_material():
+        return answer_patch, test_patch, eval_log
+    return _MATCHED_REGIME_WITHHELD, _MATCHED_REGIME_WITHHELD, _matched_regime_scalar_outcome(eval_result)
+
+
 def get_diagnose_prompt_swe(entry_id, commit, root_dir, out_dir, dataset, patch_files=[]):
     if entry_id == 'solve_empty_patches':
         # Get user prompt for solving empty patches
@@ -322,6 +366,7 @@ def get_diagnose_prompt_swe(entry_id, commit, root_dir, out_dir, dataset, patch_
         answer_patch = entry['patch']
         test_patch = entry['test_patch']
         github_issue = entry['problem_statement']
+        answer_patch, test_patch, eval_log = _matched_info_regime_gate(answer_patch, test_patch, eval_log, eval_result)
         diagnose_prompt_out = swe_issue_prompt + diagnose_prompt.format(md_log=md_log, eval_log=eval_log, predicted_patch=predicted_patch, answer_patch=answer_patch, test_patch=test_patch, github_issue=github_issue)
 
     # Get system prompt
@@ -367,6 +412,7 @@ def get_diagnose_prompt_polyglot(entry_id, commit, root_dir, out_dir, dataset, p
     if 'empty_patch' in eval_result:
         # Get user prompt for solving empty patches
         return coding_agent_summary_polyglot + diagnose_system_message.format(code=code_text), diagnose_prompt_emptypatches_polyglot.format(md_log=md_log)
+    answer_patch, test_patch, eval_log = _matched_info_regime_gate(answer_patch, test_patch, eval_log, eval_result)
     return coding_agent_summary_polyglot + diagnose_system_message.format(code=code_text), polyglot_issue_prompt + diagnose_prompt.format(md_log=md_log, eval_log=eval_log, predicted_patch=predicted_patch, answer_patch=answer_patch, test_patch=test_patch, github_issue=github_issue)
 
 
